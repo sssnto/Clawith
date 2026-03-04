@@ -110,14 +110,24 @@ Cada agente tiene un sistema de archivos completo: documentos, código, datos, p
 ```bash
 git clone https://github.com/dataelement/Clawith.git
 cd Clawith
-bash setup.sh     # Crea usuario/BD PostgreSQL + instala dependencias + inicializa BD
+bash setup.sh     # Configuración automática de PostgreSQL + dependencias + inicialización de BD
 bash restart.sh   # Inicia los servicios
 # → http://localhost:3008
 ```
 
-> **Nota:** PostgreSQL debe estar en ejecución antes de ejecutar `setup.sh`. Para desarrollo local, añade `?ssl=disable` a `DATABASE_URL`.
+> **Nota:** `setup.sh` detecta automáticamente PostgreSQL disponible. Si no encuentra ninguno, **descarga e inicia una instancia local automáticamente**. Para usar una instancia específica de PostgreSQL, configure `DATABASE_URL` en el archivo `.env`.
 
 El primer usuario en registrarse se convierte automáticamente en **administrador de la plataforma**.
+
+### Solución de Problemas de Red
+
+Si `git clone` es lento o se agota el tiempo:
+
+| Solución | Comando |
+|---|---|
+| **Clonación superficial** (solo último commit) | `git clone --depth 1 https://github.com/dataelement/Clawith.git` |
+| **Descargar archivo Release** (sin git) | Ir a [Releases](https://github.com/dataelement/Clawith/releases), descargar `.tar.gz` |
+| **Configurar proxy git** | `git config --global http.proxy socks5://127.0.0.1:1080` |
 
 ## 🔒 Lista de Seguridad
 

@@ -110,14 +110,24 @@ Clawith は、オープンソースのマルチエージェントコラボレー
 ```bash
 git clone https://github.com/dataelement/Clawith.git
 cd Clawith
-bash setup.sh     # PostgreSQLユーザー/DB作成 + 依存関係 + DB初期化を自動実行
+bash setup.sh     # PostgreSQL自動セットアップ + 依存関係 + DB初期化
 bash restart.sh   # サービス起動
 # → http://localhost:3008
 ```
 
-> **注意：** `setup.sh` を実行する前に PostgreSQL が起動している必要があります。ローカル開発では `DATABASE_URL` に `?ssl=disable` を追加してください。
+> **注意：** `setup.sh` は利用可能な PostgreSQL を検出します。見つからない場合は**自動的にローカルインスタンスをダウンロードして起動します**。特定の PostgreSQL インスタンスを使用する場合は、`.env` ファイルで `DATABASE_URL` を設定してください。
 
 最初に登録したユーザーが自動的に**プラットフォーム管理者**になります。
+
+### ネットワークトラブルシューティング
+
+`git clone` が遅い、またはタイムアウトする場合：
+
+| 解決策 | コマンド |
+|---|---|
+| **シャロークローン**（最新コミットのみ） | `git clone --depth 1 https://github.com/dataelement/Clawith.git` |
+| **Release アーカイブ**（git 不要） | [Releases](https://github.com/dataelement/Clawith/releases) から `.tar.gz` をダウンロード |
+| **git プロキシ設定** | `git config --global http.proxy socks5://127.0.0.1:1080` |
 
 ## 🔒 セキュリティチェックリスト
 

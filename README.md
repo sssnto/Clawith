@@ -116,12 +116,12 @@ bash setup.sh
 
 This will:
 1. Create `.env` from `.env.example`
-2. Create PostgreSQL role (`clawith`) and database — **requires a running PostgreSQL instance**
+2. Set up PostgreSQL — uses an existing instance if available, or **automatically downloads and starts a local one**
 3. Install backend dependencies (Python venv + pip)
 4. Install frontend dependencies (npm)
 5. Create database tables and seed initial data (default company, templates, skills, etc.)
 
-> **Note:** If PostgreSQL is on a non-default port or requires custom credentials, create a `.env` file first and set `DATABASE_URL` before running `setup.sh`. For local development, append `?ssl=disable` to the URL to prevent connection hangs:
+> **Note:** If you want to use a specific PostgreSQL instance, create a `.env` file and set `DATABASE_URL` before running `setup.sh`:
 > ```
 > DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/clawith?ssl=disable
 > ```
@@ -146,6 +146,16 @@ docker compose up -d
 ### First Login
 
 The first user to register automatically becomes the **platform admin**. Open the app, click "Register", and create your account.
+
+### Network Troubleshooting
+
+If `git clone` is slow or times out:
+
+| Solution | Command |
+|---|---|
+| **Shallow clone** (download only latest commit) | `git clone --depth 1 https://github.com/dataelement/Clawith.git` |
+| **Download release archive** (no git needed) | Go to [Releases](https://github.com/dataelement/Clawith/releases), download `.tar.gz` |
+| **Use a git proxy** (if you have one) | `git config --global http.proxy socks5://127.0.0.1:1080` |
 
 ---
 

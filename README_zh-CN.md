@@ -114,9 +114,9 @@ cd Clawith
 bash setup.sh
 ```
 
-自动完成：创建 `.env` → 创建 PostgreSQL 用户和数据库 → 安装后端/前端依赖 → 建表 → 初始化默认公司、模板和技能。
+自动完成：创建 `.env` → 设置 PostgreSQL（优先使用已有实例，找不到则**自动下载并启动本地实例**）→ 安装后端/前端依赖 → 建表 → 初始化默认公司、模板和技能。
 
-> **注意：** 如果 PostgreSQL 使用非默认端口或自定义凭据，请先创建 `.env` 文件并设置 `DATABASE_URL`，然后再运行 `setup.sh`。本地开发需要在 URL 末尾添加 `?ssl=disable` 以避免连接卡死：
+> **注意：** 如需指定特定的 PostgreSQL 实例，请先创建 `.env` 文件并设置 `DATABASE_URL`：
 > ```
 > DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/clawith?ssl=disable
 > ```
@@ -141,6 +141,27 @@ docker compose up -d
 ### 首次登录
 
 第一个注册的用户自动成为**平台管理员**。打开应用，点击"注册"，创建你的账号即可。
+
+### 网络问题
+
+如果 `git clone` 速度较慢或超时：
+
+| 方案 | 命令 |
+|---|---|
+| **浅克隆**（仅下载最新提交） | `git clone --depth 1 https://github.com/dataelement/Clawith.git` |
+| **下载 Release 压缩包**（无需 git） | 前往 [Releases](https://github.com/dataelement/Clawith/releases) 下载 `.tar.gz` |
+| **使用代理**（如果已有） | `git config --global http.proxy socks5://127.0.0.1:1080` |
+
+**🇨🇳 国内用户加速方案：** 使用 GitHub 代理加速站（实时代理，无版本延迟）：
+
+```bash
+# 以下任选其一，将 github.com 替换为加速站域名即可
+git clone https://ghfast.top/https://github.com/dataelement/Clawith.git
+git clone https://ghproxy.com/https://github.com/dataelement/Clawith.git
+git clone https://gitclone.com/github.com/dataelement/Clawith.git
+```
+
+> **备选加速站：** [ghfast.top](https://ghfast.top) · [ghproxy.com](https://ghproxy.com) · [gitclone.com](https://gitclone.com) · [kkgithub.com](https://kkgithub.com)。这些是第三方代理站点，建议收藏多个备选以防下线。仅用于只读操作（clone / download），请勿在代理站登录 GitHub 账号。
 
 ---
 
