@@ -13,10 +13,22 @@ SMITHERY_API_BASE = "https://registry.smithery.ai"
 MODELSCOPE_API_BASE = "https://modelscope.cn"
 
 
-async def _get_smithery_api_key() -> str:
-    """Read Smithery API key from discover_resources or import_mcp_server tool config."""
+async def _get_smithery_api_key(agent_id: uuid.UUID | None = None) -> str:
+    """Read Smithery API key.
+
+    Priority: 1) per-agent AgentTool config, 2) system-level tool config.
+    """
     try:
         async with async_session() as db:
+            # 1) Per-agent: check AgentTool configs for any MCP tool with a smithery_api_key
+            if agent_id:
+                at_r = await db.execute(
+                    select(AgentTool).where(AgentTool.agent_id == agent_id)
+                )
+                for at in at_r.scalars().all():
+                    if at.config and at.config.get("smithery_api_key"):
+                        return at.config["smithery_api_key"]
+            # 2) System-level fallback
             for tool_name in ("discover_resources", "import_mcp_server"):
                 r = await db.execute(select(Tool).where(Tool.name == tool_name))
                 tool = r.scalar_one_or_none()
@@ -177,6 +189,52 @@ async def search_smithery(query: str, max_results: int = 5) -> str:
 
 # ── Import MCP Server ───────────────────────────────────────────
 
+async def _ensure_smithery_connection(api_key: str, mcp_url: str, display_name: str) -> dict:
+    """Create or reuse a Smithery Connect namespace + connection.
+
+    Returns dict with keys: namespace, connection_id, auth_url (if OAuth needed).
+    """
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            # Get or create namespace
+            ns_resp = await client.get("https://api.smithery.ai/namespaces", headers=headers)
+            namespaces = ns_resp.json().get("namespaces", []) if ns_resp.status_code == 200 else []
+            if namespaces:
+                namespace = namespaces[0]["name"]
+            else:
+                create_ns = await client.post(
+                    "https://api.smithery.ai/namespaces",
+                    json={"name": "clawith"},
+                    headers=headers,
+                )
+                if create_ns.status_code not in (200, 201):
+                    return {"error": f"Failed to create namespace: HTTP {create_ns.status_code}"}
+                namespace = create_ns.json()["name"]
+
+            # Create connection
+            conn_id = display_name.lower().replace(" ", "-").replace(":", "")
+            conn_resp = await client.post(
+                f"https://api.smithery.ai/connect/{namespace}",
+                json={"connectionId": conn_id, "mcpUrl": mcp_url, "name": display_name},
+                headers=headers,
+            )
+            if conn_resp.status_code not in (200, 201):
+                return {"error": f"Failed to create connection: HTTP {conn_resp.status_code} — {conn_resp.text[:200]}"}
+
+            conn_data = conn_resp.json()
+            result = {
+                "namespace": namespace,
+                "connection_id": conn_data.get("connectionId", conn_id),
+            }
+            status = conn_data.get("status", {})
+            if isinstance(status, dict) and status.get("state") == "auth_required":
+                result["auth_url"] = status.get("authorizationUrl", "")
+            return result
+    except Exception as e:
+        return {"error": str(e)[:200]}
+
+
 async def import_mcp_from_smithery(
     server_id: str,
     agent_id: uuid.UUID,
@@ -186,13 +244,20 @@ async def import_mcp_from_smithery(
 
     Uses the Smithery Registry detail API to get tool definitions,
     and stores the deploymentUrl for runtime execution via Smithery Connect.
+    If config contains 'smithery_api_key', it's stored per-agent for future use.
     """
-    api_key = await _get_smithery_api_key()
+    config = dict(config) if config else {}  # mutable copy
+
+    # Extract smithery_api_key from config (user-provided) or fallback to stored
+    api_key = config.pop("smithery_api_key", None) or await _get_smithery_api_key(agent_id)
     if not api_key:
         return (
-            "❌ Smithery API key is required to import MCP servers. "
-            "Please configure it in Enterprise Settings → Tools → Resource Discovery → Smithery API Key.\n"
-            "Get your key at: https://smithery.ai/account/api-keys"
+            "❌ Smithery API key is required to import MCP servers.\n\n"
+            "请提供你的 Smithery API Key，你可以通过以下步骤获取：\n"
+            "1. 注册/登录 https://smithery.ai\n"
+            "2. 前往 https://smithery.ai/account/api-keys 创建 API Key\n"
+            "3. 将 Key 提供给我，例如：\n"
+            '   `import_mcp_server(server_id="github", config={"smithery_api_key": "your-key"})`'
         )
 
     # Step 1: Search for server by ID
@@ -262,9 +327,29 @@ async def import_mcp_from_smithery(
         print(f"[ResourceDiscovery] Could not fetch server detail: {e}")
 
     # Step 3: Determine the MCP server URL for runtime execution
-    # deploymentUrl is the actual MCP server (e.g. https://github.run.tools)
-    # We store this as the base URL; at runtime, Smithery Connect creates a connection with it
     base_mcp_url = deployment_url or f"https://{qualified_name}.run.tools"
+
+    # Step 3.5: Auto-create Smithery Connect namespace + connection
+    smithery_config = {}  # will be merged into every AgentTool.config
+    auth_message = ""
+    conn_result = await _ensure_smithery_connection(api_key, base_mcp_url, display_name)
+    if "error" in conn_result:
+        auth_message = f"\n\n⚠️ Could not auto-create Smithery connection: {conn_result['error']}"
+    else:
+        smithery_config = {
+            "smithery_api_key": api_key,
+            "smithery_namespace": conn_result["namespace"],
+            "smithery_connection_id": conn_result["connection_id"],
+        }
+        if conn_result.get("auth_url"):
+            auth_message = (
+                f"\n\n🔐 **OAuth 授权需要**: 请在浏览器中访问以下链接完成授权：\n"
+                f"{conn_result['auth_url']}\n"
+                f"授权完成后，工具即可使用。"
+            )
+
+    # Merge smithery_config + user config for AgentTool
+    agent_tool_config = {**smithery_config, **config}
 
     async with async_session() as db:
         imported_tools = []
@@ -279,13 +364,12 @@ async def import_mcp_from_smithery(
             )
             at = agent_check.scalar_one_or_none()
             if at:
-                if config:
-                    at.config = {**(at.config or {}), **config}
+                at.config = {**(at.config or {}), **agent_tool_config}
             else:
                 db.add(AgentTool(
                     agent_id=agent_id, tool_id=tool_id, enabled=True,
                     source="user_installed", installed_by_agent_id=agent_id,
-                    config=config or {},
+                    config=agent_tool_config,
                 ))
 
         # On re-import with config: update ALL existing tools for this server
@@ -382,5 +466,8 @@ async def import_mcp_from_smithery(
     result = f"🔌 Imported MCP server: **{display_name}** (`{server_id}`)\n\n"
     result += "\n".join(imported_tools)
     result += f"\n\n📡 MCP Server URL: `{base_mcp_url}`"
-    result += "\n\n💡 The imported tools are now available for use."
+    if auth_message:
+        result += auth_message
+    else:
+        result += "\n\n💡 The imported tools are now available for use."
     return result

@@ -969,11 +969,20 @@ async def _execute_via_smithery_connect(mcp_url: str, tool_name: str, arguments:
     import httpx
     import json as json_mod
 
-    # Get Smithery API key and connection details
-    from app.services.resource_discovery import _get_smithery_api_key
-    api_key = await _get_smithery_api_key()
+    # Get Smithery API key from tool config (per-agent)
+    api_key = config.pop("smithery_api_key", None)
     if not api_key:
-        return "❌ Smithery API key not configured. Please set it in Enterprise Settings → Tools."
+        # Fallback to system-level
+        from app.services.resource_discovery import _get_smithery_api_key
+        api_key = await _get_smithery_api_key()
+    if not api_key:
+        return (
+            "❌ Smithery API key not configured.\n\n"
+            "请提供你的 Smithery API Key，你可以通过以下步骤获取：\n"
+            "1. 注册/登录 https://smithery.ai\n"
+            "2. 前往 https://smithery.ai/account/api-keys 创建 API Key\n"
+            "3. 将 Key 提供给我，我会帮你配置"
+        )
 
     # Get namespace + connection from tool config, or use defaults
     namespace = config.pop("smithery_namespace", None)
