@@ -584,7 +584,28 @@ export default function EnterpriseSettings() {
         onSuccess: () => { qc.invalidateQueries({ queryKey: ['llm-models'] }); setShowAddModel(false); setEditingModelId(null); },
     });
     const deleteModel = useMutation({
-        mutationFn: (id: string) => fetchJson(`/enterprise/llm-models/${id}`, { method: 'DELETE' }),
+        mutationFn: async ({ id, force = false }: { id: string; force?: boolean }) => {
+            const url = force ? `/enterprise/llm-models/${id}?force=true` : `/enterprise/llm-models/${id}`;
+            const res = await fetch(`/api${url}`, {
+                method: 'DELETE',
+                headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+            });
+            if (res.status === 409) {
+                const data = await res.json();
+                const agents = data.detail?.agents || [];
+                const msg = `This model is used by ${agents.length} agent(s):\n\n${agents.join(', ')}\n\nDelete anyway? (their model config will be cleared)`;
+                if (confirm(msg)) {
+                    // Retry with force
+                    const r2 = await fetch(`/api/enterprise/llm-models/${id}?force=true`, {
+                        method: 'DELETE',
+                        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+                    });
+                    if (!r2.ok && r2.status !== 204) throw new Error('Delete failed');
+                }
+                return;
+            }
+            if (!res.ok && res.status !== 204) throw new Error('Delete failed');
+        },
         onSuccess: () => qc.invalidateQueries({ queryKey: ['llm-models'] }),
     });
 
@@ -720,7 +741,7 @@ export default function EnterpriseSettings() {
                                             setModelForm({ provider: m.provider, model: m.model, label: m.label, base_url: m.base_url || '', api_key: '', supports_vision: m.supports_vision || false });
                                             setShowAddModel(true);
                                         }} style={{ fontSize: '12px' }}>✏️ Edit</button>
-                                        <button className="btn btn-ghost" onClick={() => deleteModel.mutate(m.id)} style={{ color: 'var(--error)' }}>{t('common.delete')}</button>
+                                        <button className="btn btn-ghost" onClick={() => deleteModel.mutate({ id: m.id })} style={{ color: 'var(--error)' }}>{t('common.delete')}</button>
                                     </div>
                                 </div>
                             ))}

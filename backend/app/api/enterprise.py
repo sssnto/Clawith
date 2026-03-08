@@ -60,6 +60,7 @@ async def add_llm_model(
 @router.delete("/llm-models/{model_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def remove_llm_model(
     model_id: uuid.UUID,
+    force: bool = False,
     current_user: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -68,14 +69,33 @@ async def remove_llm_model(
     model = result.scalar_one_or_none()
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
+
+    # Check if any agents reference this model
+    from sqlalchemy import or_, update
+    ref_result = await db.execute(
+        select(Agent.name).where(
+            or_(Agent.primary_model_id == model_id, Agent.fallback_model_id == model_id)
+        )
+    )
+    agent_names = [row[0] for row in ref_result.all()]
+
+    if agent_names and not force:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": f"This model is used by {len(agent_names)} agent(s)",
+                "agents": agent_names,
+            },
+        )
+
     # Nullify FK references in agents before deleting
-    from sqlalchemy import update
-    await db.execute(
-        update(Agent).where(Agent.primary_model_id == model_id).values(primary_model_id=None)
-    )
-    await db.execute(
-        update(Agent).where(Agent.fallback_model_id == model_id).values(fallback_model_id=None)
-    )
+    if agent_names:
+        await db.execute(
+            update(Agent).where(Agent.primary_model_id == model_id).values(primary_model_id=None)
+        )
+        await db.execute(
+            update(Agent).where(Agent.fallback_model_id == model_id).values(fallback_model_id=None)
+        )
     await db.delete(model)
     await db.commit()
 
