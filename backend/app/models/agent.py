@@ -64,6 +64,11 @@ class Agent(Base):
     context_window_size: Mapped[int] = mapped_column(Integer, default=100)
     max_tool_rounds: Mapped[int] = mapped_column(Integer, default=50)
 
+    # Trigger limits (per-agent, configurable from Settings UI)
+    max_triggers: Mapped[int] = mapped_column(Integer, default=20)
+    min_poll_interval_min: Mapped[int] = mapped_column(Integer, default=5)
+    webhook_rate_limit: Mapped[int] = mapped_column(Integer, default=5)
+
     # Expiry control
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_expired: Mapped[bool] = mapped_column(Boolean, default=False)

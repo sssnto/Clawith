@@ -3,7 +3,6 @@
 import json
 import uuid
 
-import httpx
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -78,6 +77,8 @@ async def get_chat_history(
     out = []
     for m in messages:
         entry: dict = {"role": m.role, "content": m.content, "created_at": m.created_at.isoformat() if m.created_at else None}
+        if getattr(m, 'thinking', None):
+            entry["thinking"] = m.thinking
         if m.role == "tool_call":
             # Parse JSON-encoded tool call data
             try:
@@ -106,14 +107,15 @@ async def call_llm(
     on_thinking=None,
     supports_vision=False,
 ) -> str:
-    """Call LLM via OpenAI-compatible API with function-calling tool loop.
-    
+    """Call LLM via unified client with function-calling tool loop.
+
     Args:
         on_chunk: Optional async callback(text: str) for streaming chunks to client.
+        on_thinking: Optional async callback(text: str) for reasoning/thinking content.
+        on_tool_call: Optional async callback(dict) for tool call status updates.
     """
-    import json as _json
-    import httpx
     from app.services.agent_tools import AGENT_TOOLS, execute_tool, get_agent_tools_for_llm
+    from app.services.llm_utils import create_llm_client, get_max_tokens, LLMMessage, LLMError
 
     # ── Token limit check & config ──
     _max_tool_rounds = 50  # default
@@ -151,8 +153,15 @@ async def call_llm(
     # Load tools dynamically from DB
     tools_for_llm = await get_agent_tools_for_llm(agent_id) if agent_id else AGENT_TOOLS
 
-    api_messages = [{"role": "system", "content": system_prompt}]
-    api_messages.extend(messages)
+    # Convert messages to LLMMessage format
+    api_messages = [LLMMessage(role="system", content=system_prompt)]
+    for msg in messages:
+        api_messages.append(LLMMessage(
+            role=msg.get("role", "user"),
+            content=msg.get("content"),
+            tool_calls=msg.get("tool_calls"),
+            tool_call_id=msg.get("tool_call_id"),
+        ))
 
     # ── Vision format conversion ──
     # If the model supports vision, convert image markers in user messages
@@ -160,9 +169,9 @@ async def call_llm(
     if supports_vision:
         import re as _re_v
         for i, msg in enumerate(api_messages):
-            if msg.get("role") != "user" or not isinstance(msg.get("content"), str):
+            if msg.role != "user" or not msg.content:
                 continue
-            content_str = msg["content"]
+            content_str = msg.content
             # Find [image_data:data:image/...;base64,...] markers
             pattern = r'\[image_data:(data:image/[^;]+;base64,[A-Za-z0-9+/=]+)\]'
             images = _re_v.findall(pattern, content_str)
@@ -175,35 +184,41 @@ async def call_llm(
                 parts.append({"type": "image_url", "image_url": {"url": img_url}})
             if text:
                 parts.append({"type": "text", "text": text})
-            api_messages[i] = {**msg, "content": parts}
+            # Replace the message content with the array format
+            api_messages[i] = LLMMessage(
+                role=msg.role,
+                content=parts,  # type: ignore  # This is valid for vision models
+            )
     else:
         # Strip base64 image markers for non-vision models to avoid wasting tokens
         import re as _re_strip
         _img_pattern = r'\[image_data:data:image/[^;]+;base64,[A-Za-z0-9+/=]+\]'
         for i, msg in enumerate(api_messages):
-            if msg.get("role") != "user" or not isinstance(msg.get("content"), str):
+            if msg.role != "user" or not isinstance(msg.content, str):
                 continue
-            if "[image_data:" in msg["content"]:
-                _n_imgs = len(_re_strip.findall(_img_pattern, msg["content"]))
-                cleaned = _re_strip.sub('', msg["content"]).strip()
+            if "[image_data:" in msg.content:
+                _n_imgs = len(_re_strip.findall(_img_pattern, msg.content))
+                cleaned = _re_strip.sub('', msg.content).strip()
                 if _n_imgs > 0:
                     cleaned += f"\n[用户发送了 {_n_imgs} 张图片，但当前模型不支持视觉，无法查看图片内容]"
-                api_messages[i] = {**msg, "content": cleaned}
+                api_messages[i] = LLMMessage(
+                    role=msg.role,
+                    content=cleaned,
+                )
 
-    # Determine base URL
-    from app.services.llm_utils import get_provider_base_url, get_tool_params, get_max_tokens
-    base_url = get_provider_base_url(model.provider, model.base_url)
+    # Create the unified LLM client
+    try:
+        client = create_llm_client(
+            provider=model.provider,
+            api_key=model.api_key_encrypted,
+            model=model.model,
+            base_url=model.base_url,
+            timeout=120.0,
+        )
+    except Exception as e:
+        return f"[Error] Failed to create LLM client: {e}"
 
-    if not base_url:
-        return f"[Error] No API endpoint configured for {model.provider}"
-
-    url_base = base_url.rstrip('/')
-    if url_base.endswith('/chat/completions'):
-        url = url_base
-    else:
-        url = f"{url_base}/chat/completions"
-    api_key = model.api_key_encrypted
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+    max_tokens = get_max_tokens(model.provider, model.model)
 
     # Tool-calling loop (configurable per agent, default 50)
     for round_i in range(_max_tool_rounds):
@@ -213,288 +228,37 @@ async def call_llm(
         _warn_threshold_80 = int(_max_tool_rounds * 0.8)
         _warn_threshold_96 = _max_tool_rounds - 2
         if round_i == _warn_threshold_80:
-            api_messages.append({
-                "role": "system",
-                "content": (
+            api_messages.append(LLMMessage(
+                role="system",
+                content=(
                     f"⚠️ 你已使用 {round_i}/{_max_tool_rounds} 轮工具调用。"
-                    "如果当前任务尚未完成，请尽快保存进度到 agenda.md，"
+                    "如果当前任务尚未完成，请尽快保存进度到 focus.md，"
                     "并使用 set_trigger 设置续接触发器，在剩余轮次中做好收尾。"
                 ),
-            })
+            ))
         elif round_i == _warn_threshold_96:
-            api_messages.append({
-                "role": "system",
-                "content": f"🚨 仅剩 2 轮工具调用。请立即保存进度到 agenda.md 并设置续接触发器。",
-            })
-        payload = {
-            "model": model.model,
-            "messages": api_messages,
-            "temperature": 0.7,
-            "max_tokens": get_max_tokens(model.provider, model.model),  # provider-safe limit
-            "tools": tools_for_llm,
-            "stream": True,
-            **get_tool_params(model.provider),
-        }
+            api_messages.append(LLMMessage(
+                role="system",
+                content=f"🚨 仅剩 2 轮工具调用。请立即保存进度到 focus.md 并设置续接触发器。",
+            ))
 
-        # Stream the response (with retry for connection errors & empty responses)
-        full_content = ""
-        tool_calls_data = []  # accumulate tool calls from stream
-        last_finish_reason = None
-        _max_retries = 3
-        _RETRIABLE_HTTP_CODES = {429, 500, 502, 503}
-
-        # ── Streaming <think> tag filter state ──
-        # Some reasoning models (MiniMax, DeepSeek-R1) wrap internal
-        # chain-of-thought in <think>...</think> tags inside the content
-        # field.  We suppress these from being streamed to the user.
-        _in_think = False        # True while inside <think>...</think>
-        _tag_buffer = ""         # buffer for partial tag matching
-        for _attempt in range(_max_retries):
-            try:
-                async with httpx.AsyncClient(timeout=120) as client:
-                    async with client.stream("POST", url, json=payload, headers=headers) as resp:
-                        # Debug: log HTTP status and request ID
-                        _req_id = resp.headers.get("x-request-id") or resp.headers.get("request-id") or resp.headers.get("cf-ray") or ""
-                        print(f"[LLM-DBG] HTTP status={resp.status_code}, url={url}, request_id={_req_id}", flush=True)
-                        if resp.status_code in _RETRIABLE_HTTP_CODES:
-                            error_body = ""
-                            async for chunk in resp.aiter_bytes():
-                                error_body += chunk.decode(errors="replace")
-                            print(f"[LLM-DBG] Retriable HTTP {resp.status_code}: {error_body[:300]}", flush=True)
-                            if _attempt < _max_retries - 1:
-                                import asyncio as _aio
-                                wait = (_attempt + 1) * 2  # 2s, 4s
-                                print(f"[LLM-RETRY] HTTP {resp.status_code}, retrying in {wait}s (attempt {_attempt+1}/{_max_retries})...", flush=True)
-                                await _aio.sleep(wait)
-                                full_content = ""
-                                tool_calls_data = []
-                                last_finish_reason = None
-                                continue
-                            return f"[LLM Error] HTTP {resp.status_code} after {_max_retries} retries: {error_body[:200]}"
-                        if resp.status_code >= 400:
-                            error_body = ""
-                            async for chunk in resp.aiter_bytes():
-                                error_body += chunk.decode(errors="replace")
-                            print(f"[LLM-DBG] Error body: {error_body[:500]}", flush=True)
-                            return f"[LLM Error] HTTP {resp.status_code}: {error_body[:200]}"
-                        line_count = 0
-                        async for line in resp.aiter_lines():
-                            line_count += 1
-                            if line_count <= 3:
-                                print(f"[LLM-DBG] line#{line_count}: {line[:200]}", flush=True)
-                            if not line.startswith("data: "):
-                                continue
-                            data_str = line[6:]
-                            if data_str.strip() == "[DONE]":
-                                break
-                            try:
-                                chunk = _json.loads(data_str)
-                            except _json.JSONDecodeError:
-                                continue
-
-                            if "error" in chunk:
-                                err_msg = chunk['error'].get('message', str(chunk['error']))[:200]
-                                # Retry on server-side errors in SSE body
-                                if _attempt < _max_retries - 1 and any(kw in err_msg.lower() for kw in ["overloaded", "rate_limit", "capacity", "temporarily"]):
-                                    import asyncio as _aio
-                                    wait = (_attempt + 1) * 2
-                                    print(f"[LLM-RETRY] SSE error '{err_msg[:80]}', retrying in {wait}s...", flush=True)
-                                    await _aio.sleep(wait)
-                                    full_content = ""
-                                    tool_calls_data = []
-                                    last_finish_reason = None
-                                    break  # break inner loop to retry
-                                return f"[LLM Error] {err_msg}"
-
-                            choices = chunk.get("choices", [])
-                            if not choices:
-                                continue
-                            choice = choices[0]
-                            delta = choice.get("delta", {})
-                            fr = choice.get("finish_reason")
-                            if fr:
-                                last_finish_reason = fr
-
-                            # Debug: log first few chunks to diagnose empty content
-                            if len(full_content) == 0 and not tool_calls_data:
-                                print(f"[LLM-DBG] chunk: delta={delta}, finish={fr}", flush=True)
-
-                            # Text content — filter out <think>...</think> blocks
-                            if delta.get("content"):
-                                text = delta["content"]
-                                full_content += text
-
-                                # ── streaming think-tag filter ──
-                                _tag_buffer += text
-                                emit = ""
-                                think_emit = ""
-                                i = 0
-                                buf = _tag_buffer
-                                while i < len(buf):
-                                    if not _in_think:
-                                        if buf[i] == '<':
-                                            tag_candidate = buf[i:]
-                                            open_tag = "<think>"
-                                            if tag_candidate.startswith(open_tag):
-                                                _in_think = True
-                                                i += len(open_tag)
-                                                continue
-                                            elif open_tag.startswith(tag_candidate):
-                                                _tag_buffer = buf[i:]
-                                                break
-                                            else:
-                                                emit += buf[i]
-                                                i += 1
-                                        else:
-                                            emit += buf[i]
-                                            i += 1
-                                    else:
-                                        if buf[i] == '<':
-                                            tag_candidate = buf[i:]
-                                            close_tag = "</think>"
-                                            if tag_candidate.startswith(close_tag):
-                                                _in_think = False
-                                                i += len(close_tag)
-                                                continue
-                                            elif close_tag.startswith(tag_candidate):
-                                                _tag_buffer = buf[i:]
-                                                break
-                                            else:
-                                                think_emit += buf[i]
-                                                i += 1
-                                        else:
-                                            think_emit += buf[i]
-                                            i += 1
-                                else:
-                                    _tag_buffer = ""  # fully consumed
-
-                                if think_emit and on_thinking:
-                                    try:
-                                        await on_thinking(think_emit)
-                                    except Exception:
-                                        pass
-                                if emit and on_chunk:
-                                    try:
-                                        await on_chunk(emit)
-                                    except Exception:
-                                        pass
-
-                            # Tool calls (accumulate across streaming chunks)
-                            if delta.get("tool_calls"):
-                                for tc_delta in delta["tool_calls"]:
-                                    idx = tc_delta.get("index", 0)
-                                    while len(tool_calls_data) <= idx:
-                                        tool_calls_data.append({"id": "", "function": {"name": "", "arguments": ""}})
-                                    tc = tool_calls_data[idx]
-                                    if tc_delta.get("id"):
-                                        tc["id"] = tc_delta["id"]
-                                    fn_delta = tc_delta.get("function") or {}
-                                    if fn_delta.get("name"):
-                                        tc["function"]["name"] += fn_delta["name"]
-                                    # Accumulate arguments — must use 'is not None' since '' is valid
-                                    arg_chunk = fn_delta.get("arguments")
-                                    if arg_chunk is not None:
-                                        if isinstance(arg_chunk, dict):
-                                            # Some providers send pre-parsed JSON
-                                            import json as _j2
-                                            tc["function"]["arguments"] = _j2.dumps(arg_chunk, ensure_ascii=False)
-                                        else:
-                                            tc["function"]["arguments"] += str(arg_chunk)
-                                    # Also check for 'input' field (Anthropic/Bedrock native format)
-                                    if "input" in fn_delta:
-                                        inp = fn_delta["input"]
-                                        if isinstance(inp, dict):
-                                            import json as _j3
-                                            tc["function"]["arguments"] = _j3.dumps(inp, ensure_ascii=False)
-                                        elif isinstance(inp, str) and inp:
-                                            tc["function"]["arguments"] += inp
-
-                # Check for empty response — retry if LLM returned nothing
-                if not full_content.strip() and not tool_calls_data:
-                    if _attempt < _max_retries - 1:
-                        import asyncio as _aio
-                        wait = (_attempt + 1) * 2  # 2s, 4s
-                        print(f"[LLM-RETRY] Empty response from LLM (no content, no tool_calls), retrying in {wait}s (attempt {_attempt+1}/{_max_retries})...", flush=True)
-                        await _aio.sleep(wait)
-                        full_content = ""
-                        tool_calls_data = []
-                        last_finish_reason = None
-                        _in_think = False
-                        _tag_buffer = ""
-                        continue
-                    print(f"[LLM-WARN] Empty response after {_max_retries} attempts", flush=True)
-
-                break  # Success — exit retry loop
-
-            except (httpx.ConnectError, httpx.ReadError, httpx.ConnectTimeout, httpx.ReadTimeout) as e:
-                if _attempt < _max_retries - 1:
-                    import asyncio as _aio
-                    wait = (_attempt + 1) * 2  # 2s, 4s
-                    print(f"[LLM-RETRY] Attempt {_attempt+1} failed ({type(e).__name__}), retrying in {wait}s...", flush=True)
-                    await _aio.sleep(wait)
-                    full_content = ""
-                    tool_calls_data = []
-                    last_finish_reason = None
-                    _in_think = False
-                    _tag_buffer = ""
-                    continue
-                import traceback
-                traceback.print_exc()
-                return f"[LLM call error] {type(e).__name__}: Connection failed after {_max_retries} attempts"
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                return f"[LLM call error] {type(e).__name__}: {str(e)[:200]}"
-
-        # Detect truncation
-        if last_finish_reason == "length":
-            print(f"[LLM-WARN] Stream ended with finish_reason='length' — output was likely truncated by max_tokens!", flush=True)
-
-        # If no tool calls, check for hallucination before returning
-        if not tool_calls_data:
-            # Strip <think>...</think> from final content (reasoning models)
-            import re as _re
-            full_content = _re.sub(r'<think>[\s\S]*?</think>\s*', '', full_content).strip()
-
-            # ── Hallucination guard ──
-            # Detect when the model claims to have completed an action (e.g. created a
-            # calendar event, wrote a document) without actually calling any tools.
-            # This is a known failure mode for some models (e.g. qwen-plus) that generate
-            # plausible-sounding "success" text instead of calling the tool.
-            _HALLUCINATION_PATTERNS = [
-                r'evt_[A-Za-z0-9]{8,}',           # fake Feishu event IDs
-                r'已成功创建.{0,20}(日历|日程|会议|事件)',
-                r'(日程|日历|事件|会议).{0,20}已.{0,5}(创建|添加|同步)',
-                r'doc_token["\s]*[:=]\s*["\']?[A-Za-z0-9_-]{10,}',  # fake doc tokens
-            ]
-            _tool_names_in_tools = {t["function"]["name"] for t in tools_for_llm}
-            _action_tools = {
-                "feishu_calendar_create", "feishu_calendar_update", "feishu_calendar_delete",
-                "feishu_doc_create", "feishu_doc_append", "send_feishu_message",
-                "write_file", "execute_code",
-            }
-            _has_action_tools = bool(_tool_names_in_tools & _action_tools)
-            _looks_like_hallucination = _has_action_tools and any(
-                _re.search(p, full_content) for p in _HALLUCINATION_PATTERNS
+        try:
+            # Use streaming API for real-time responses
+            response = await client.stream(
+                messages=api_messages,
+                tools=tools_for_llm if tools_for_llm else None,
+                temperature=0.7,
+                max_tokens=max_tokens,
+                on_chunk=on_chunk,
+                on_thinking=on_thinking,
             )
-            if _looks_like_hallucination and round_i < _max_tool_rounds - 1:
-                print(f"[LLM-WARN] Hallucination detected: model claimed success without calling tools. Injecting correction.", flush=True)
-                api_messages.append({"role": "assistant", "content": full_content})
-                api_messages.append({
-                    "role": "user",
-                    "content": (
-                        "[SYSTEM ERROR] Your previous response claimed to have completed an action "
-                        "but you did NOT call any tool. You have NOT created any event, document, "
-                        "or message — nothing happened. You MUST use the actual tool call mechanism. "
-                        "Please call the correct tool now with the parameters from the original request."
-                    ),
-                })
-                full_content = ""
-                tool_calls_data = []
-                last_finish_reason = None
-                _in_think = False
-                _tag_buffer = ""
-                continue  # retry with correction injected
+        except LLMError as e:
+            return f"[LLM Error] {e}"
+        except Exception as e:
+            return f"[LLM call error] {type(e).__name__}: {str(e)[:200]}"
+
+        # If no tool calls, return the final content
+        if not response.tool_calls:
             # Track token usage
             if agent_id:
                 try:
@@ -503,37 +267,53 @@ async def call_llm(
                         _ar = await _db.execute(select(AgentModel).where(AgentModel.id == agent_id))
                         _agent = _ar.scalar_one_or_none()
                         if _agent:
-                            total_chars = sum(len(m.get('content', '') or '') for m in api_messages) + len(full_content or '')
+                            total_chars = sum(len(m.content or '') for m in api_messages) + len(response.content or '')
                             estimated_tokens = max(total_chars // 3, 1)
                             _agent.tokens_used_today = (_agent.tokens_used_today or 0) + estimated_tokens
                             _agent.tokens_used_month = (_agent.tokens_used_month or 0) + estimated_tokens
                             await _db.commit()
                 except Exception:
                     pass
-            return full_content or "[LLM returned empty content]"
+            await client.close()
+            return response.content or "[LLM returned empty content]"
 
         # Execute tool calls
-        print(f"[LLM] Round {round_i+1}: {len(tool_calls_data)} tool call(s)")
-        msg_with_tools = {"role": "assistant", "content": full_content or None, "tool_calls": [
-            {"id": tc["id"], "type": "function", "function": tc["function"]} for tc in tool_calls_data
-        ]}
-        api_messages.append(msg_with_tools)
+        print(f"[LLM] Round {round_i+1}: {len(response.tool_calls)} tool call(s)")
 
-        for tc in tool_calls_data:
+        # Add assistant message with tool calls
+        api_messages.append(LLMMessage(
+            role="assistant",
+            content=response.content or None,
+            tool_calls=[{
+                "id": tc["id"],
+                "type": "function",
+                "function": tc["function"],
+            } for tc in response.tool_calls],
+            reasoning_content=response.reasoning_content,
+        ))
+
+        full_reasoning_content = response.reasoning_content or ""
+
+        for tc in response.tool_calls:
             fn = tc["function"]
             tool_name = fn["name"]
             raw_args = fn.get("arguments", "{}")
             print(f"[LLM] Raw arguments for {tool_name}: {repr(raw_args[:300])}", flush=True)
             try:
-                args = _json.loads(raw_args) if raw_args else {}
-            except (_json.JSONDecodeError, TypeError):
+                args = json.loads(raw_args) if raw_args else {}
+            except json.JSONDecodeError:
                 args = {}
 
             print(f"[LLM] Calling tool: {tool_name}({args})")
             # Notify client about tool call (in-progress)
             if on_tool_call:
                 try:
-                    await on_tool_call({"name": tool_name, "args": args, "status": "running"})
+                    await on_tool_call({
+                        "name": tool_name,
+                        "args": args,
+                        "status": "running",
+                        "reasoning_content": full_reasoning_content
+                    })
                 except Exception:
                     pass
 
@@ -547,16 +327,23 @@ async def call_llm(
             # Notify client about tool call result
             if on_tool_call:
                 try:
-                    await on_tool_call({"name": tool_name, "args": args, "status": "done", "result": result})
+                    await on_tool_call({
+                        "name": tool_name,
+                        "args": args,
+                        "status": "done",
+                        "result": result,
+                        "reasoning_content": full_reasoning_content
+                    })
                 except Exception:
                     pass
 
-            api_messages.append({
-                "role": "tool",
-                "tool_call_id": tc["id"],
-                "content": result,
-            })
+            api_messages.append(LLMMessage(
+                role="tool",
+                tool_call_id=tc["id"],
+                content=str(result),
+            ))
 
+    await client.close()
     return "[Error] Too many tool call rounds"
 
 
@@ -711,7 +498,7 @@ async def websocket_chat(
                 tc_result = tc_data.get("result", "")
                 tc_id = f"call_{msg.id}"  # synthetic tool_call_id
                 # Assistant message with tool_calls array
-                conversation.append({
+                asst_msg = {
                     "role": "assistant",
                     "content": None,
                     "tool_calls": [{
@@ -719,7 +506,10 @@ async def websocket_chat(
                         "type": "function",
                         "function": {"name": tc_name, "arguments": _j_hist.dumps(tc_args, ensure_ascii=False)},
                     }],
-                })
+                }
+                if tc_data.get("reasoning_content"):
+                    asst_msg["reasoning_content"] = tc_data["reasoning_content"]
+                conversation.append(asst_msg)
                 # Tool result message
                 conversation.append({
                     "role": "tool",
@@ -729,7 +519,10 @@ async def websocket_chat(
             except Exception:
                 continue  # Skip malformed tool_call records
         else:
-            conversation.append({"role": msg.role, "content": msg.content})
+            entry = {"role": msg.role, "content": msg.content}
+            if hasattr(msg, 'thinking') and msg.thinking:
+                entry["thinking"] = msg.thinking
+            conversation.append(entry)
 
     try:
         # Send welcome message on new session (no history)
@@ -834,6 +627,7 @@ async def websocket_chat(
                                             "args": data.get("args"),
                                             "status": "done",
                                             "result": (data.get("result") or "")[:500],
+                                            "reasoning_content": data.get("reasoning_content"),
                                         }),
                                         conversation_id=conv_id,
                                     )
@@ -842,8 +636,12 @@ async def websocket_chat(
                             except Exception as _tc_err:
                                 print(f"[WS] Failed to save tool_call: {_tc_err}")
                     
+                    # Track thinking content for storage
+                    thinking_content = []
+                    
                     async def thinking_to_ws(text: str):
                         """Send thinking chunks to client for collapsible display."""
+                        thinking_content.append(text)
                         await websocket.send_json({"type": "thinking", "content": text})
 
                     assistant_response = await call_llm(
@@ -924,6 +722,7 @@ async def websocket_chat(
                     user_id=user_id,
                     role="assistant",
                     content=assistant_response,
+                    thinking=''.join(thinking_content) if thinking_content else None,
                     conversation_id=conv_id,
                 )
                 db.add(asst_msg)

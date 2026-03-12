@@ -224,45 +224,44 @@ async def get_agent_metrics(
     agent, _access = await check_agent_access(db, current_user, agent_id)
 
     # Task stats
-    total_tasks_result = await db.execute(select(func.count(Task.id)).where(Task.agent_id == agent_id))
-    total_tasks_val = total_tasks_result.scalar() or 0
-    
-    done_tasks_result = await db.execute(
+    total_tasks = await db.execute(select(func.count(Task.id)).where(Task.agent_id == agent_id))
+    done_tasks = await db.execute(
         select(func.count(Task.id)).where(Task.agent_id == agent_id, Task.status == "done")
     )
-    done_tasks_val = done_tasks_result.scalar() or 0
-    
-    pending_tasks_result = await db.execute(
+    pending_tasks = await db.execute(
         select(func.count(Task.id)).where(Task.agent_id == agent_id, Task.status == "pending")
     )
-    pending_tasks_val = pending_tasks_result.scalar() or 0
 
     # Approval stats
-    total_approvals_result = await db.execute(
+    total_approvals = await db.execute(
         select(func.count(ApprovalRequest.id)).where(ApprovalRequest.agent_id == agent_id)
     )
-    total_approvals_val = total_approvals_result.scalar() or 0
-    
-    pending_approvals_result = await db.execute(
+    pending_approvals = await db.execute(
         select(func.count(ApprovalRequest.id)).where(
             ApprovalRequest.agent_id == agent_id, ApprovalRequest.status == "pending"
         )
     )
-    pending_approvals_val = pending_approvals_result.scalar() or 0
 
     # Recent activity count (last 24h)
     from datetime import datetime, timedelta, timezone
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-    recent_actions_result = await db.execute(
+    recent_actions = await db.execute(
         select(func.count(AuditLog.id)).where(
             AuditLog.agent_id == agent_id, AuditLog.created_at >= cutoff
         )
     )
-    recent_actions_val = recent_actions_result.scalar() or 0
 
     # Container status
     from app.services.agent_manager import agent_manager
     container_status = agent_manager.get_container_status(agent)
+
+    # Extract scalar values (each result can only be consumed once)
+    _total_tasks = total_tasks.scalar() or 0
+    _done_tasks = done_tasks.scalar() or 0
+    _pending_tasks = pending_tasks.scalar() or 0
+    _total_approvals = total_approvals.scalar() or 0
+    _pending_approvals = pending_approvals.scalar() or 0
+    _recent_actions = recent_actions.scalar() or 0
 
     return {
         "agent_id": str(agent_id),
@@ -276,18 +275,18 @@ async def get_agent_metrics(
             "limit_month": agent.max_tokens_per_month,
         },
         "tasks": {
-            "total": total_tasks_val,
-            "done": done_tasks_val,
-            "pending": pending_tasks_val,
+            "total": _total_tasks,
+            "done": _done_tasks,
+            "pending": _pending_tasks,
             "completion_rate": round(
-                done_tasks_val / max(total_tasks_val, 1) * 100, 1
+                _done_tasks / max(_total_tasks, 1) * 100, 1
             ),
         },
         "approvals": {
-            "total": total_approvals_val,
-            "pending": pending_approvals_val,
+            "total": _total_approvals,
+            "pending": _pending_approvals,
         },
         "activity": {
-            "actions_last_24h": recent_actions_val,
+            "actions_last_24h": _recent_actions,
         },
     }

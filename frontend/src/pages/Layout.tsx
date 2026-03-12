@@ -267,7 +267,7 @@ export default function Layout() {
             <nav className={`sidebar ${isSidebarCollapsed ? 'collapsed' : ''}`}>
                 <div className="sidebar-top">
                     <div className="sidebar-logo">
-                        <img src="/logo.png" alt="" style={{ width: 22, height: 22 }} />
+                        <img src={theme === 'dark' ? '/logo-white.png' : '/logo-black.png'} alt="" style={{ width: 22, height: 22 }} />
                         <span className="sidebar-logo-text">Clawith</span>
                     </div>
 
@@ -352,22 +352,56 @@ export default function Layout() {
                 </div>
 
                 <div className="sidebar-scrollable">
-                    <div className="sidebar-section">
-                        <div className="sidebar-section-title">{t('nav.myAgents')}</div>
-                        {agents.map((agent) => (
-                            <NavLink
-                                key={agent.id}
-                                to={`/agents/${agent.id}`}
-                                className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}
-                                title={agent.name}
-                            >
-                                <span className="sidebar-item-icon">
-                                    <span className={`status-dot ${statusDotClass(agent.status)}`} />
-                                </span>
-                                <span className="sidebar-item-text">{agent.name}</span>
-                            </NavLink>
-                        ))}
-                    </div>
+                    {/* My created agents */}
+                    {(() => {
+                        const myAgents = agents.filter((a: any) => a.created_by === user?.id);
+                        const sharedAgents = agents.filter((a: any) => a.created_by !== user?.id);
+                        return (
+                            <>
+                                {myAgents.length > 0 && (
+                                    <div className="sidebar-section">
+                                        <div className="sidebar-section-title">{t('nav.myCreated')}</div>
+                                        {myAgents.map((agent: any) => (
+                                            <NavLink
+                                                key={agent.id}
+                                                to={`/agents/${agent.id}`}
+                                                className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}
+                                                title={agent.name}
+                                            >
+                                                <span className="sidebar-item-icon">
+                                                    <span className={`status-dot ${statusDotClass(agent.status)}`} />
+                                                </span>
+                                                <span className="sidebar-item-text">{agent.name}</span>
+                                            </NavLink>
+                                        ))}
+                                    </div>
+                                )}
+                                {sharedAgents.length > 0 && (
+                                    <div className="sidebar-section">
+                                        <div className="sidebar-section-title">{t('nav.companyShared')}</div>
+                                        {sharedAgents.map((agent: any) => (
+                                            <NavLink
+                                                key={agent.id}
+                                                to={`/agents/${agent.id}`}
+                                                className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}
+                                                title={agent.name}
+                                            >
+                                                <span className="sidebar-item-icon">
+                                                    <span className={`status-dot ${statusDotClass(agent.status)}`} />
+                                                </span>
+                                                <span className="sidebar-item-text">{agent.name}</span>
+                                            </NavLink>
+                                        ))}
+                                    </div>
+                                )}
+                                {agents.length === 0 && (
+                                    <div className="sidebar-section">
+                                        <div className="sidebar-section-title">{t('nav.myAgents')}</div>
+                                    </div>
+                                )}
+                            </>
+                        );
+                    })()}
                 </div>
 
                 <div className="sidebar-bottom">

@@ -192,7 +192,9 @@ async def create_session(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     now = datetime.now(tz.utc)
+    new_id = uuid.uuid4()
     session = ChatSession(
+        id=new_id,
         agent_id=agent_id,
         user_id=current_user.id,
         title=body.title or f"Session {now.strftime('%m-%d %H:%M')}",
@@ -312,6 +314,8 @@ async def get_session_messages(
                 out.append(part)
         else:
             entry = {"role": m.role, "content": m.content}
+            if hasattr(m, 'thinking') and m.thinking:
+                entry["thinking"] = m.thinking
             if sender_name:
                 entry["sender_name"] = sender_name
             out.append(entry)

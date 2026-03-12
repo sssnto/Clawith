@@ -100,6 +100,9 @@ class AgentOut(BaseModel):
     max_tokens_per_day: int | None = None
     max_tokens_per_month: int | None = None
     max_tool_rounds: int = 50
+    max_triggers: int = 20
+    min_poll_interval_min: int = 5
+    webhook_rate_limit: int = 5
     heartbeat_enabled: bool = True
     heartbeat_interval_minutes: int = 30
     heartbeat_active_hours: str = "09:00-18:00"
@@ -127,6 +130,9 @@ class AgentUpdate(BaseModel):
     max_tokens_per_day: int | None = None
     max_tokens_per_month: int | None = None
     max_tool_rounds: int | None = None
+    max_triggers: int | None = None
+    min_poll_interval_min: int | None = None
+    webhook_rate_limit: int | None = None
     heartbeat_enabled: bool | None = None
     heartbeat_interval_minutes: int | None = None
     heartbeat_active_hours: str | None = None
@@ -337,6 +343,7 @@ class ChatMessageOut(BaseModel):
     user_id: uuid.UUID
     role: str
     content: str
+    thinking: str | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

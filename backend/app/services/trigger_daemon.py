@@ -5,15 +5,18 @@ with a unified trigger evaluation engine. Runs as an asyncio background task.
 
 Every 15 seconds:
   1. Load all enabled triggers from DB
-  2. Evaluate each trigger (cron/once/interval/poll/on_message)
+  2. Evaluate each trigger (cron/once/interval/poll/on_message/webhook)
   3. Group fired triggers by agent_id (30s dedup window)
   4. Invoke each agent once with all its fired triggers as context
 """
 
 import asyncio
+import ipaddress
+import json as _json
 import logging
 import uuid
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urlparse
 
 from croniter import croniter
 from sqlalchemy import select
@@ -27,9 +30,44 @@ logger = logging.getLogger(__name__)
 TICK_INTERVAL = 15  # seconds
 DEDUP_WINDOW = 30   # seconds — same agent won't be invoked twice within this window
 MAX_AGENT_CHAIN_DEPTH = 5  # A→B→A→B→A max depth before stopping
+MIN_POLL_INTERVAL_MINUTES = 5  # minimum poll interval to prevent abuse
 
 # Track last invocation time per agent to enforce dedup window
 _last_invoke: dict[uuid.UUID, datetime] = {}
+
+# Webhook rate limiter: token -> list of timestamps
+_webhook_hits: dict[str, list[float]] = {}
+WEBHOOK_RATE_LIMIT = 5   # max hits per minute per token
+
+
+# ── SSRF Protection ─────────────────────────────────────────────────
+
+def _is_private_url(url: str) -> bool:
+    """Block private/internal URLs to prevent SSRF attacks."""
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            return True
+
+        # Block obvious private hostnames
+        if hostname in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+            return True
+
+        # Try to resolve hostname and check IP
+        import socket
+        try:
+            infos = socket.getaddrinfo(hostname, None)
+            for info in infos:
+                ip = ipaddress.ip_address(info[4][0])
+                if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                    return True
+        except (socket.gaierror, ValueError):
+            return True  # Cannot resolve = block
+
+        return False
+    except Exception:
+        return True  # Block on any parsing error
 
 
 # ── Trigger Evaluation ──────────────────────────────────────────────
@@ -95,7 +133,7 @@ async def _evaluate_trigger(trigger: AgentTrigger, now: datetime) -> bool:
         return (now - base) >= timedelta(minutes=minutes)
 
     elif t == "poll":
-        interval_min = cfg.get("interval_min", 5)
+        interval_min = max(cfg.get("interval_min", 5), MIN_POLL_INTERVAL_MINUTES)
         base = trigger.last_fired_at or trigger.created_at
         if (now - base) < timedelta(minutes=interval_min):
             return False
@@ -104,6 +142,12 @@ async def _evaluate_trigger(trigger: AgentTrigger, now: datetime) -> bool:
 
     elif t == "on_message":
         return await _check_new_agent_messages(trigger)
+
+    elif t == "webhook":
+        # Check if a webhook payload is pending
+        if cfg.get("_webhook_pending"):
+            return True
+        return False
 
     return False
 
@@ -118,6 +162,11 @@ async def _poll_check(trigger: AgentTrigger) -> bool:
     cfg = trigger.config or {}
     url = cfg.get("url")
     if not url:
+        return False
+
+    # SSRF protection: block private/internal URLs
+    if _is_private_url(url):
+        logger.warning(f"Poll blocked for trigger {trigger.name}: private/internal URL '{url}'")
         return False
 
     try:
@@ -339,12 +388,18 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
             trigger_names = []
             for t in triggers:
                 part = f"触发器：{t.name} ({t.type})\n原因：{t.reason}"
-                if t.agenda_ref:
-                    part += f"\n关联 agenda：{t.agenda_ref}"
+                if t.focus_ref:
+                    part += f"\n关联 Focus：{t.focus_ref}"
                 # Include matched message for on_message triggers
                 cfg = t.config or {}
                 if t.type == "on_message" and cfg.get("_matched_message"):
                     part += f"\n收到来自 {cfg.get('_matched_from', '?')} 的消息：\n\"{cfg['_matched_message'][:500]}\""
+                # Include webhook payload
+                if t.type == "webhook" and cfg.get("_webhook_payload"):
+                    payload_str = cfg["_webhook_payload"]
+                    if len(payload_str) > 2000:
+                        payload_str = payload_str[:2000] + "... (truncated)"
+                    part += f"\nWebhook Payload:\n{payload_str}"
                 context_parts.append(part)
                 trigger_names.append(t.name)
 
@@ -393,12 +448,41 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
                 participant_id=agent_participant.id if agent_participant else None,
             ))
             await db.commit()
+            # Cache participant ID for callbacks
+            agent_participant_id = agent_participant.id if agent_participant else None
 
         # Call LLM (outside the DB session to avoid long transactions)
         collected_content = []
 
         async def on_chunk(text):
             collected_content.append(text)
+
+        # Persist tool calls into Pulse Session for Reflections visibility
+        async def on_tool_call(data):
+            try:
+                async with async_session() as _tc_db:
+                    if data["status"] == "running":
+                        _tc_db.add(ChatMessage(
+                            agent_id=agent_id,
+                            conversation_id=str(session_id),
+                            role="tool_call",
+                            content=_json.dumps({"name": data["name"], "args": data["args"]}, ensure_ascii=False, default=str),
+                            user_id=agent.creator_id,
+                            participant_id=agent_participant_id,
+                        ))
+                    elif data["status"] == "done":
+                        result_str = str(data.get("result", ""))[:2000]
+                        _tc_db.add(ChatMessage(
+                            agent_id=agent_id,
+                            conversation_id=str(session_id),
+                            role="tool_result",
+                            content=_json.dumps({"name": data["name"], "result": result_str}, ensure_ascii=False, default=str),
+                            user_id=agent.creator_id,
+                            participant_id=agent_participant_id,
+                        ))
+                    await _tc_db.commit()
+            except Exception as e:
+                logger.warning(f"Failed to persist tool call for trigger session: {e}")
 
         reply = await call_llm(
             model=model,
@@ -408,9 +492,10 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
             agent_id=agent_id,
             user_id=agent.creator_id,
             on_chunk=on_chunk,
+            on_tool_call=on_tool_call,
         )
 
-        # Store the reply in the Pulse Session
+        # Save assistant reply to Pulse session
         async with async_session() as db:
             result = await db.execute(
                 select(Participant).where(Participant.type == "agent", Participant.ref_id == agent_id)
@@ -426,21 +511,9 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
                 participant_id=agent_participant.id if agent_participant else None,
             ))
 
-            # Update trigger states
-            for t in triggers:
-                result = await db.execute(select(AgentTrigger).where(AgentTrigger.id == t.id))
-                trigger = result.scalar_one_or_none()
-                if trigger:
-                    trigger.last_fired_at = datetime.now(timezone.utc)
-                    trigger.fire_count += 1
-                    # Auto-disable single-shot types
-                    if trigger.type == "once":
-                        trigger.is_enabled = False
-                    if trigger.type == "on_message":
-                        trigger.is_enabled = False  # single-shot for agent-to-agent
-                    # Auto-disable expired
-                    if trigger.max_fires and trigger.fire_count >= trigger.max_fires:
-                        trigger.is_enabled = False
+            # NOTE: trigger state (last_fired_at, fire_count, auto-disable)
+            # is already updated in _tick() BEFORE this task was launched,
+            # to prevent race-condition duplicate fires.
 
             await db.commit()
 
@@ -570,6 +643,37 @@ async def _tick():
         if last and (now - last).total_seconds() < DEDUP_WINDOW:
             continue  # Skip — invoked too recently
         _last_invoke[agent_id] = now
+
+        # ── Immediately update trigger state BEFORE launching async task ──
+        # This prevents the next tick from re-evaluating the same trigger as
+        # "should fire" while the LLM call is still running (which can take
+        # minutes). Without this, the 15s tick interval + 30s dedup window
+        # would cause repeated invocations for long-running triggers.
+        try:
+            async with async_session() as db:
+                for t in agent_triggers:
+                    result = await db.execute(
+                        select(AgentTrigger).where(AgentTrigger.id == t.id)
+                    )
+                    trigger = result.scalar_one_or_none()
+                    if trigger:
+                        trigger.last_fired_at = now
+                        trigger.fire_count += 1
+                        # Auto-disable single-shot types immediately
+                        if trigger.type in ("once", "on_message", "webhook"):
+                            trigger.is_enabled = False
+                        if trigger.type == "webhook" and trigger.config:
+                            trigger.config = {
+                                **trigger.config,
+                                "_webhook_pending": False,
+                                "_webhook_payload": None,
+                            }
+                        if trigger.max_fires and trigger.fire_count >= trigger.max_fires:
+                            trigger.is_enabled = False
+                await db.commit()
+        except Exception as e:
+            logger.warning(f"Failed to pre-update trigger state: {e}")
+
         asyncio.create_task(_invoke_agent_for_triggers(agent_id, agent_triggers))
 
 

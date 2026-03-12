@@ -4,7 +4,7 @@
  * - Agent Workspace, Skills, Soul, Memory tabs
  * - Enterprise Knowledge Base
  */
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import MarkdownRenderer from './MarkdownRenderer';
 
@@ -94,6 +94,16 @@ export default function FileBrowser({
     const [promptModal, setPromptModal] = useState<{ title: string; placeholder: string; action: string } | null>(null);
     const [promptValue, setPromptValue] = useState('');
     const [uploadProgress, setUploadProgress] = useState<{ fileName: string; percent: number } | null>(null);
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+    // Auto-resize textarea to match content height
+    useEffect(() => {
+        const el = textareaRef.current;
+        if (el && editing) {
+            el.style.height = 'auto';
+            el.style.height = Math.max(200, el.scrollHeight) + 'px';
+        }
+    }, [editing, editContent]);
 
     // ─── Helpers ───────────────────────────────────────
 
@@ -348,8 +358,8 @@ export default function FileBrowser({
                     )}
                 </div>
                 {editing ? (
-                    <textarea className="form-textarea" value={editContent} onChange={e => setEditContent(e.target.value)}
-                        rows={20} style={{ fontFamily: 'var(--font-mono)', fontSize: '13px', lineHeight: '1.6' }} />
+                    <textarea ref={textareaRef} className="form-textarea" value={editContent} onChange={e => setEditContent(e.target.value)}
+                        style={{ fontFamily: 'var(--font-mono)', fontSize: '13px', lineHeight: '1.6', minHeight: '200px', resize: 'vertical', overflow: 'hidden' }} />
                 ) : !contentLoaded ? (
                     <div style={{ padding: '20px', color: 'var(--text-tertiary)', textAlign: 'center' }}>{t('common.loading')}</div>
                 ) : content ? (
@@ -407,8 +417,8 @@ export default function FileBrowser({
                 <div className="card">
                     {isText ? (
                         editing ? (
-                            <textarea className="form-textarea" value={editContent} onChange={e => setEditContent(e.target.value)}
-                                style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', lineHeight: '1.6', minHeight: '400px' }} />
+                            <textarea ref={textareaRef} className="form-textarea" value={editContent} onChange={e => setEditContent(e.target.value)}
+                                style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', lineHeight: '1.6', minHeight: '200px', resize: 'vertical', overflow: 'hidden' }} />
                         ) : viewing?.endsWith('.md') ? (
                             <MarkdownRenderer content={content || ''} style={{ padding: '4px' }} />
                         ) : (

@@ -110,7 +110,7 @@ BUILTIN_TOOLS = [
                 "type": {"type": "string", "enum": ["cron", "once", "interval", "poll", "on_message"], "description": "Trigger type"},
                 "config": {"type": "object", "description": "Type-specific config. cron: {\"expr\": \"0 9 * * *\"}. once: {\"at\": \"2026-03-10T09:00:00+08:00\"}. interval: {\"minutes\": 30}. poll: {\"url\": \"...\", \"json_path\": \"$.status\"}. on_message: {\"from_agent_name\": \"Morty\"} or {\"from_user_name\": \"张三\"}"},
                 "reason": {"type": "string", "description": "What to do when this trigger fires"},
-                "agenda_ref": {"type": "string", "description": "Optional: which agenda item this relates to"},
+                "focus_ref": {"type": "string", "description": "Optional: which focus item this relates to"},
             },
             "required": ["name", "type", "config", "reason"],
         },

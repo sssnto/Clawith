@@ -77,7 +77,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Write or update a file in the workspace. Can update memory/memory.md, agenda.md, task_history.md, create documents in workspace/, create skills in skills/.",
+            "description": "Write or update a file in the workspace. Can update memory/memory.md, focus.md, task_history.md, create documents in workspace/, create skills in skills/.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -116,7 +116,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "set_trigger",
-            "description": "Set a new trigger to wake yourself up at a specific time or condition. Use this to schedule future actions, monitor changes, or wait for messages. The trigger will fire and invoke you with the reason text as context. Trigger types: 'cron' (recurring schedule), 'once' (fire once at a time), 'interval' (every N minutes), 'poll' (HTTP monitoring), 'on_message' (when another agent or a human user replies — use from_agent_name for agents, or from_user_name for human users on Feishu/Slack/Discord).",
+            "description": "Set a new trigger to wake yourself up at a specific time or condition. Use this to schedule future actions, monitor changes, or wait for messages. The trigger will fire and invoke you with the reason text as context. Trigger types: 'cron' (recurring schedule), 'once' (fire once at a time), 'interval' (every N minutes), 'poll' (HTTP monitoring), 'on_message' (when another agent or a human user replies — use from_agent_name for agents, or from_user_name for human users on Feishu/Slack/Discord), 'webhook' (receive external HTTP POST — system generates a unique URL, give it to the user so they can configure it in external services like GitHub, Grafana, etc.).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -126,20 +126,20 @@ AGENT_TOOLS = [
                     },
                     "type": {
                         "type": "string",
-                        "enum": ["cron", "once", "interval", "poll", "on_message"],
+                        "enum": ["cron", "once", "interval", "poll", "on_message", "webhook"],
                         "description": "Trigger type",
                     },
                     "config": {
                         "type": "object",
-                        "description": "Type-specific config. cron: {\"expr\": \"0 9 * * *\"}. once: {\"at\": \"2026-03-10T09:00:00+08:00\"}. interval: {\"minutes\": 30}. poll: {\"url\": \"...\", \"json_path\": \"$.status\", \"fire_on\": \"change\", \"interval_min\": 5}. on_message: {\"from_agent_name\": \"Morty\"} or {\"from_user_name\": \"张三\"} (for human users on Feishu/Slack/Discord)",
+                        "description": "Type-specific config. cron: {\"expr\": \"0 9 * * *\"}. once: {\"at\": \"2026-03-10T09:00:00+08:00\"}. interval: {\"minutes\": 30}. poll: {\"url\": \"...\", \"json_path\": \"$.status\", \"fire_on\": \"change\", \"interval_min\": 5}. on_message: {\"from_agent_name\": \"Morty\"} or {\"from_user_name\": \"张三\"} (for human users on Feishu/Slack/Discord). webhook: {\"secret\": \"optional_hmac_secret\"} (system auto-generates the URL)",
                     },
                     "reason": {
                         "type": "string",
                         "description": "What you should do when this trigger fires. This will be shown to you as context when you wake up.",
                     },
-                    "agenda_ref": {
+                    "focus_ref": {
                         "type": "string",
-                        "description": "Optional: which agenda item this trigger relates to",
+                        "description": "Optional: identifier of the focus item in focus.md that this trigger relates to (use the checklist identifier, e.g. 'daily_news_check')",
                     },
                 },
                 "required": ["name", "type", "config", "reason"],
@@ -747,11 +747,6 @@ async def ensure_workspace(agent_id: uuid.UUID) -> Path:
     # Ensure shared enterprise_info directory exists
     enterprise_dir = WORKSPACE_ROOT / "enterprise_info"
     enterprise_dir.mkdir(parents=True, exist_ok=True)
-    (enterprise_dir / "knowledge_base").mkdir(exist_ok=True)
-    # Create default company profile if missing
-    profile_path = enterprise_dir / "company_profile.md"
-    if not profile_path.exists():
-        profile_path.write_text("# Company Profile\n\n_Edit company information here. All digital employees can access this._\n\n## Basic Info\n- Company Name:\n- Industry:\n- Founded:\n\n## Business Overview\n\n## Organization Structure\n\n## Company Culture\n", encoding="utf-8")
 
     # Migrate: move root-level memory.md into memory/ directory
     if (ws / "memory.md").exists() and not (ws / "memory" / "memory.md").exists():
@@ -2561,7 +2556,7 @@ async def _import_mcp_server(agent_id: uuid.UUID, arguments: dict) -> str:
 # ─── Trigger Management Handlers (Pulse Engine) ────────────────────
 
 MAX_TRIGGERS_PER_AGENT = 20
-VALID_TRIGGER_TYPES = {"cron", "once", "interval", "poll", "on_message"}
+VALID_TRIGGER_TYPES = {"cron", "once", "interval", "poll", "on_message", "webhook"}
 
 
 async def _handle_set_trigger(agent_id: uuid.UUID, arguments: dict) -> str:
@@ -2572,7 +2567,7 @@ async def _handle_set_trigger(agent_id: uuid.UUID, arguments: dict) -> str:
     ttype = arguments.get("type", "").strip()
     config = arguments.get("config", {})
     reason = arguments.get("reason", "").strip()
-    agenda_ref = arguments.get("agenda_ref", "")
+    focus_ref = arguments.get("focus_ref", "") or arguments.get("agenda_ref", "")  # backward compat
 
     if not name:
         return "❌ Missing required argument 'name'"
@@ -2603,9 +2598,20 @@ async def _handle_set_trigger(agent_id: uuid.UUID, arguments: dict) -> str:
     elif ttype == "on_message":
         if not config.get("from_agent_name") and not config.get("from_user_name"):
             return "❌ on_message trigger requires config.from_agent_name (for agents) or config.from_user_name (for human users on Feishu/Slack/Discord)"
+    elif ttype == "webhook":
+        # Auto-generate a unique token for the webhook URL
+        import secrets
+        token = secrets.token_urlsafe(8)  # ~11 chars, URL-safe
+        config["token"] = token
 
     try:
         async with async_session() as db:
+            # Load agent to get per-agent trigger limit
+            from app.models.agent import Agent as _AgentModel
+            _a_result = await db.execute(select(_AgentModel).where(_AgentModel.id == agent_id))
+            _agent_obj = _a_result.scalar_one_or_none()
+            agent_max_triggers = (_agent_obj.max_triggers if _agent_obj else None) or MAX_TRIGGERS_PER_AGENT
+
             # Check max triggers
             from sqlalchemy import func as sa_func
             result = await db.execute(
@@ -2615,8 +2621,8 @@ async def _handle_set_trigger(agent_id: uuid.UUID, arguments: dict) -> str:
                 )
             )
             count = result.scalar() or 0
-            if count >= MAX_TRIGGERS_PER_AGENT:
-                return f"❌ Maximum trigger limit reached ({MAX_TRIGGERS_PER_AGENT}). Cancel some triggers first."
+            if count >= agent_max_triggers:
+                return f"❌ Maximum trigger limit reached ({agent_max_triggers}). Cancel some triggers first."
 
             # Check for duplicate name
             result = await db.execute(
@@ -2634,7 +2640,7 @@ async def _handle_set_trigger(agent_id: uuid.UUID, arguments: dict) -> str:
                     existing.type = ttype
                     existing.config = config
                     existing.reason = reason
-                    existing.agenda_ref = agenda_ref or None
+                    existing.focus_ref = focus_ref or None
                     existing.is_enabled = True
                     existing.fire_count = 0
                     existing.last_fired_at = None
@@ -2647,7 +2653,7 @@ async def _handle_set_trigger(agent_id: uuid.UUID, arguments: dict) -> str:
                 type=ttype,
                 config=config,
                 reason=reason,
-                agenda_ref=agenda_ref or None,
+                focus_ref=focus_ref or None,
             )
             db.add(trigger)
             await db.commit()
@@ -2660,6 +2666,16 @@ async def _handle_set_trigger(agent_id: uuid.UUID, arguments: dict) -> str:
             }, agent_id=agent_id)
         except Exception:
             pass
+
+        # Return webhook URL for webhook triggers
+        if ttype == "webhook":
+            from app.config import get_settings
+            settings = get_settings()
+            base = getattr(settings, 'PUBLIC_URL', '') or ''
+            if not base:
+                base = 'https://try.clawith.ai'  # fallback
+            webhook_url = f"{base.rstrip('/')}/api/webhooks/t/{config['token']}"
+            return f"✅ Webhook trigger '{name}' created.\n\nWebhook URL: {webhook_url}\n\nTell the user to configure this URL in their external service (e.g. GitHub, Grafana). When the service sends a POST to this URL, you will be woken up with the payload as context."
 
         return f"✅ Trigger '{name}' created ({ttype}). It will fire according to your config and wake you up with the reason as context."
 

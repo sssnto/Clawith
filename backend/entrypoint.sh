@@ -8,6 +8,17 @@
 
 set -e
 
+# --- Added: Permission fixing and privilege dropping ---
+if [ "$(id -u)" = '0' ]; then
+    echo "[entrypoint] Detected root user, fixing permissions..."
+    # Ensure directories exist and are owned by clawith
+    chown -R clawith:clawith /app/agent_data
+    
+    echo "[entrypoint] Dropping privileges to 'clawith' and re-executing..."
+    exec gosu clawith /bin/bash "$0" "$@"
+fi
+# -------------------------------------------------------
+
 echo "[entrypoint] Step 1: Creating/verifying database tables..."
 
 python << 'PYEOF'
@@ -76,10 +87,9 @@ async def main():
 asyncio.run(main())
 PYEOF
 
-echo "[entrypoint] Step 2: Stamping alembic to latest revision..."
-# Mark all migrations as applied so alembic does not re-run them on top of create_all.
-# This is safe: create_all already created tables with all current columns.
-alembic stamp head
+echo "[entrypoint] Step 2: Running alembic migrations..."
+# Run all migrations to ensure database schema is up to date
+alembic upgrade head
 
 echo "[entrypoint] Step 3: Starting uvicorn..."
 exec uvicorn app.main:app --host 0.0.0.0 --port 8000

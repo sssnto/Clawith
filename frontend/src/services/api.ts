@@ -14,15 +14,28 @@ async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
     const res = await fetch(`${API_BASE}${url}`, { ...options, headers });
 
     if (!res.ok) {
-        // Auto-logout on expired/invalid token
-        if (res.status === 401) {
+        // Auto-logout on expired/invalid token (but not on auth endpoints — let them show errors)
+        const isAuthEndpoint = url.startsWith('/auth/login') || url.startsWith('/auth/register');
+        if (res.status === 401 && !isAuthEndpoint) {
             localStorage.removeItem('token');
             localStorage.removeItem('user');
             window.location.href = '/login';
             throw new Error('Session expired');
         }
         const error = await res.json().catch(() => ({ detail: 'Request failed' }));
-        throw new Error(error.detail || `HTTP ${res.status}`);
+        // Pydantic validation errors return detail as an array of objects
+        let message = '';
+        if (Array.isArray(error.detail)) {
+            message = error.detail
+                .map((e: any) => {
+                    const field = e.loc?.slice(-1)[0] || '';
+                    return field ? `${field}: ${e.msg}` : e.msg;
+                })
+                .join('; ');
+        } else {
+            message = error.detail || `HTTP ${res.status}`;
+        }
+        throw new Error(message);
     }
 
     if (res.status === 204) return undefined as T;
