@@ -2902,7 +2902,7 @@ function AgentDetailInner() {
                                                 }
 
                                                 {/* Assistant message with no content: show inline thinking or skip */}
-                                                if (m.role === 'assistant' && !m.content) {
+                                                if (m.role === 'assistant' && !m.content?.trim()) {
                                                     if (m.thinking) {
                                                         return (
                                                             <div key={i} style={{ paddingLeft: '36px', marginBottom: '6px' }}>
@@ -3012,8 +3012,7 @@ function AgentDetailInner() {
                                                     );
                                                 }
                                                 {/* Assistant message with no text content: show inline thinking or skip */}
-                                                if (msg.role === 'assistant') console.log('[DBG] assistant msg:', i, 'content:', JSON.stringify(msg.content), 'thinking:', !!msg.thinking, '_streaming:', !!(msg as any)._streaming, 'contentFalsy:', !msg.content);
-                                                if (msg.role === 'assistant' && !msg.content) {
+                                                if (msg.role === 'assistant' && !msg.content?.trim()) {
                                                     if (msg.thinking) {
                                                         return (
                                                             <div key={i} style={{ paddingLeft: '36px', marginBottom: '6px' }}>
