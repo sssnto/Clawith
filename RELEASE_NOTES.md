@@ -68,11 +68,11 @@ Migrations run automatically via `entrypoint.sh`. The `--build` flag is required
 cd /path/to/Clawith
 git pull origin main
 
-# Install new dependency
+# Install new dependency (run from backend/ directory)
 cd backend
-pip install -e .   # or: pip install .
+pip install .          # production; use pip install -e . for dev/editable installs
 
-# Run migrations
+# Run migrations (must be run from backend/ directory where alembic.ini is located)
 alembic upgrade head
 
 # Restart backend
