@@ -381,7 +381,7 @@ function ToolsManager({ agentId, canManage = false }: { agentId: string; canMana
                                                         </label>
                                                     ) : field.type === 'password' ? (
                                                         <>
-                                                        <input type="password" className="form-input" value={configData[field.key] ?? ''} placeholder={field.placeholder || 'Leave blank to use global default'} onChange={e => setConfigData(p => ({ ...p, [field.key]: e.target.value }))} />
+                                                        <input type="password" autoComplete="new-password" className="form-input" value={configData[field.key] ?? ''} placeholder={field.placeholder || 'Leave blank to use global default'} onChange={e => setConfigData(p => ({ ...p, [field.key]: e.target.value }))} />
                                                         {/* Per-provider help text for auth_code */}
                                                         {field.key === 'auth_code' && (() => {
                                                             const providerField = configTool?.config_schema?.fields?.find((f: any) => f.key === 'email_provider');

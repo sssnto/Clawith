@@ -2160,7 +2160,7 @@ export default function EnterpriseSettings() {
                                                                                                 <input type="number" className="form-input" value={editingConfig[field.key] ?? field.default ?? ''} min={field.min} max={field.max}
                                                                                                     onChange={e => setEditingConfig(p => ({ ...p, [field.key]: Number(e.target.value) }))} />
                                                                                             ) : field.type === 'password' ? (
-                                                                                                <input type="password" className="form-input" value={editingConfig[field.key] ?? ''} placeholder={field.placeholder || ''}
+                                                                                                <input type="password" autoComplete="new-password" className="form-input" value={editingConfig[field.key] ?? ''} placeholder={field.placeholder || ''}
                                                                                                     onChange={e => setEditingConfig(p => ({ ...p, [field.key]: e.target.value }))} />
                                                                                             ) : (
                                                                                                 <input type="text" className="form-input" value={editingConfig[field.key] ?? field.default ?? ''} placeholder={field.placeholder || ''}
@@ -2220,7 +2220,7 @@ export default function EnterpriseSettings() {
                                                 <div key={field.key}>
                                                     <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, marginBottom: '4px' }}>{field.label}</label>
                                                     {field.type === 'password' ? (
-                                                        <input type="password" className="form-input" value={editingConfig[field.key] ?? ''} placeholder={field.placeholder || ''}
+                                                        <input type="password" autoComplete="new-password" className="form-input" value={editingConfig[field.key] ?? ''} placeholder={field.placeholder || ''}
                                                             onChange={e => setEditingConfig(p => ({ ...p, [field.key]: e.target.value }))} />
                                                     ) : (
                                                         <input type="text" className="form-input" value={editingConfig[field.key] ?? ''} placeholder={field.placeholder || ''}
