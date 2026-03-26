@@ -44,6 +44,7 @@ class TenantUpdate(BaseModel):
     im_provider: str | None = None
     timezone: str | None = None
     is_active: bool | None = None
+    allow_agent_creation_by_agents: bool | None = None
 
 
 # ─── Helpers ────────────────────────────────────────────

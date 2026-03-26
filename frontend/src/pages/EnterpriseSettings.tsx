@@ -917,6 +917,58 @@ function CompanyTimezoneEditor() {
     );
 }
 
+function AgentCreationToggle() {
+    const { t } = useTranslation();
+    const tenantId = localStorage.getItem('current_tenant_id') || '';
+    const [enabled, setEnabled] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [saved, setSaved] = useState(false);
+
+    useEffect(() => {
+        if (!tenantId) return;
+        fetchJson<any>(`/tenants/${tenantId}`)
+            .then(d => { if (d !== undefined) setEnabled(d.allow_agent_creation_by_agents ?? false); })
+            .catch(() => { });
+    }, [tenantId]);
+
+    const handleToggle = async (val: boolean) => {
+        if (!tenantId) return;
+        setSaving(true);
+        try {
+            await fetchJson(`/tenants/${tenantId}`, {
+                method: 'PUT', body: JSON.stringify({ allow_agent_creation_by_agents: val }),
+            });
+            setEnabled(val);
+            setSaved(true);
+            setTimeout(() => setSaved(false), 2000);
+        } catch (e) { }
+        setSaving(false);
+    };
+
+    return (
+        <div className="card" style={{ padding: '16px', marginBottom: '24px' }}>
+            <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 500, fontSize: '13px', marginBottom: '4px' }}>🤖 {t('enterprise.agentCreation.title', 'Agent Creation by Agents')}</div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                        {t('enterprise.agentCreation.description', 'Allow agents to create other agents via the Agent Creator skill.')}
+                    </div>
+                </div>
+                <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
+                    <input
+                        type="checkbox"
+                        checked={enabled}
+                        onChange={e => handleToggle(e.target.checked)}
+                        disabled={saving}
+                        style={{ width: '18px', height: '18px', cursor: 'pointer' }}
+                    />
+                </label>
+                {saved && <span style={{ color: 'var(--success)', fontSize: '12px' }}>✅</span>}
+            </div>
+        </div>
+    );
+}
+
 
 // ── Broadcast Section ──────────────────────────
 function BroadcastSection() {
@@ -1589,6 +1641,9 @@ export default function EnterpriseSettings() {
 
                         {/* ── 0.5. Company Timezone ── */}
                         <CompanyTimezoneEditor key={`tz-${selectedTenantId}`} />
+
+                        {/* ── Agent Creation Toggle ── */}
+                        <AgentCreationToggle key={`agent-creation-${selectedTenantId}`} />
 
                         {/* ── 1. Company Intro ── */}
                         <h3 style={{ marginBottom: '8px' }}>{t('enterprise.companyIntro.title', 'Company Intro')}</h3>
