@@ -621,41 +621,85 @@ Use the `create_agent` function provided in `scripts/agent_creator.py`.
 
 ## Example Usage
 
-### Simple Agent
+```python
+import json
+import urllib.request
+import os
 
-```
-create_agent(
-    name="Research Assistant",
-    role_description="Helps with web research and information gathering",
-    agent_type="native"
+api_url = "http://localhost:8000/api/agents/"
+api_key = os.environ.get("AGENT_API_KEY")
+if not api_key:
+    raise RuntimeError("AGENT_API_KEY not set")
+
+payload = {
+    "name": "Research Assistant",
+    "role_description": "Helps with web research and information gathering",
+    "agent_type": "native"
+}
+
+data = json.dumps(payload).encode("utf-8")
+req = urllib.request.Request(
+    api_url,
+    data=data,
+    headers={
+        "Content-Type": "application/json",
+        "X-Api-Key": api_key,
+    },
+    method="POST",
 )
+with urllib.request.urlopen(req, timeout=30) as resp:
+    result = json.loads(resp.read().decode("utf-8"))
+    print(f"Agent created: {result['id']}")
 ```
 
 ### Specialized Agent with Autonomy
 
-```
-create_agent(
-    name="Data Analyst",
-    role_description="Analyzes data and generates reports",
-    agent_type="native",
-    autonomy_policy={
+```python
+import json
+import urllib.request
+import os
+
+api_url = "http://localhost:8000/api/agents/"
+api_key = os.environ.get("AGENT_API_KEY")
+
+payload = {
+    "name": "Data Analyst",
+    "role_description": "Analyzes data and generates reports",
+    "agent_type": "native",
+    "autonomy_policy": {
         "read_files": "L1",
         "write_workspace_files": "L2",
         "send_feishu_message": "L2"
     }
-)
+}
+
+data = json.dumps(payload).encode("utf-8")
+req = urllib.request.Request(api_url, data=data, headers={"Content-Type": "application/json", "X-Api-Key": api_key}, method="POST")
+with urllib.request.urlopen(req, timeout=30) as resp:
+    result = json.loads(resp.read().decode("utf-8"))
 ```
 
 ### OpenClaw Agent (has API key)
 
-```
-create_agent(
-    name="API Agent",
-    role_description="Can interact with external APIs",
-    agent_type="openclaw"
-)
-# Returns: {id, name, api_key: "oc-..."}
-# Save the api_key — it is only shown once!
+```python
+import json
+import urllib.request
+import os
+
+api_url = "http://localhost:8000/api/agents/"
+api_key = os.environ.get("AGENT_API_KEY")
+
+payload = {
+    "name": "API Agent",
+    "role_description": "Can interact with external APIs",
+    "agent_type": "openclaw"
+}
+
+data = json.dumps(payload).encode("utf-8")
+req = urllib.request.Request(api_url, data=data, headers={"Content-Type": "application/json", "X-Api-Key": api_key}, method="POST")
+with urllib.request.urlopen(req, timeout=30) as resp:
+    result = json.loads(resp.read().decode("utf-8"))
+    print(f"API Key: {result.get('api_key')} — Save this, it's only shown once!")
 ```
 
 ## Output Format
@@ -691,6 +735,9 @@ After creation, report back with:
                     "#!/usr/bin/env python3\n"
                     '"""Helper to create a new agent via the Clawith API.\n\n'
                     "Usage:\n"
+                    "    import sys\n"
+                    "    import os\n"
+                    "    sys.path.insert(0, os.path.join(os.path.dirname(__file__)))\n"
                     "    from agent_creator import create_agent\n"
                     "    result = create_agent(\n"
                     '        name="My Agent",\n'
