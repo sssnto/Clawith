@@ -559,6 +559,204 @@ Plan would be:
         "is_default": True,
         "files": [],  # populated at runtime from agent_template/skills/MCP_INSTALLER.md
     },
+    {
+        "name": "Agent Creator",
+        "description": "Create new digital employees (agents) on the Clawith platform via API",
+        "category": "management",
+        "icon": "🤖",
+        "folder_name": "agent-creator",
+        "is_default": True,
+        "files": [
+            {
+                "path": "SKILL.md",
+                "content": """---
+name: Agent Creator
+description: Create new digital employees (agents) on the Clawith platform via API
+---
+
+# Agent Creator
+
+## Overview
+
+This skill allows you to create new digital employees on the Clawith platform by calling the `/api/agents/` endpoint.
+
+**Keywords**: create agent, new employee, digital worker, spawn agent, hire agent
+
+## When to Use This Skill
+
+- When a human or another agent asks you to "create a new agent"
+- When a task requires capabilities that no existing agent has
+- When delegating subtasks to a specialized agent makes sense
+- When explicitly asked to "spawn", "hire", or "create" an employee
+
+## What This Skill Does
+
+1. Validates the request and required parameters
+2. Calls the Clawith API to create a new agent
+3. Returns the created agent's details and credentials (if applicable)
+
+## How to Create an Agent
+
+Use the `create_agent` function provided in `scripts/agent_creator.py`.
+
+### Required Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `name` | string | Agent's display name (2-100 chars) |
+| `role_description` | string | What the agent does (max 500 chars) |
+| `agent_type` | string | `"native"` or `"openclaw"` (default: `"native"`) |
+| `bio` | string (optional) | Short biography |
+| `personality` | string (optional) | Personality traits |
+| `primary_model_id` | UUID (optional) | LLM model to use |
+
+### Optional Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `autonomy_policy` | dict | Autonomy level for each capability |
+| `max_tokens_per_day` | int | Daily token budget |
+| `max_tokens_per_month` | int | Monthly token budget |
+| `skill_ids` | list[UUID] | IDs of skills to install |
+
+## Example Usage
+
+### Simple Agent
+
+```
+create_agent(
+    name="Research Assistant",
+    role_description="Helps with web research and information gathering",
+    agent_type="native"
+)
+```
+
+### Specialized Agent with Autonomy
+
+```
+create_agent(
+    name="Data Analyst",
+    role_description="Analyzes data and generates reports",
+    agent_type="native",
+    autonomy_policy={
+        "read_files": "L1",
+        "write_workspace_files": "L2",
+        "send_feishu_message": "L2"
+    }
+)
+```
+
+### OpenClaw Agent (has API key)
+
+```
+create_agent(
+    name="API Agent",
+    role_description="Can interact with external APIs",
+    agent_type="openclaw"
+)
+# Returns: {id, name, api_key: "oc-..."}
+# Save the api_key — it is only shown once!
+```
+
+## Output Format
+
+After creation, report back with:
+
+```markdown
+## Agent Created
+
+- **Name**: [agent name]
+- **ID**: [agent UUID]
+- **Type**: [native or openclaw]
+- **Status**: [idle/creating]
+- **Expires**: [expiry timestamp]
+
+{% if api_key %}
+> **API Key**: `{{api_key}}`
+> Save this key now — it will not be shown again.
+{% endif %}
+```
+
+## Important Notes
+
+1. **API Key Security**: If creating an `openclaw` agent, the API key is only returned once. Store it securely if needed.
+2. **Native vs OpenClaw**: Native agents run in containers managed by Clawith. OpenClaw agents run externally and connect via API.
+3. **Agent Expiry**: Agents default to 48-hour TTL. Extend via the admin panel if needed.
+4. **Quota**: Agent creation may be subject to quota limits set by your organization.
+""",
+            },
+            {
+                "path": "scripts/agent_creator.py",
+                "content": (
+                    "#!/usr/bin/env python3\n"
+                    '"""Helper to create a new agent via the Clawith API.\n\n'
+                    "Usage:\n"
+                    "    from agent_creator import create_agent\n"
+                    "    result = create_agent(\n"
+                    '        name="My Agent",\n'
+                    '        role_description="What the agent does",\n'
+                    '        agent_type="native",  # or "openclaw"\n'
+                    "    )\n"
+                    '    print(result["id"], result.get("api_key"))\n'
+                    '"""\n\n'
+                    "import json\n"
+                    "import os\n"
+                    "import urllib.request\n\n\n"
+                    "def create_agent(\n"
+                    "    name: str,\n"
+                    "    role_description: str = \"\",\n"
+                    "    agent_type: str = \"native\",\n"
+                    "    bio: str | None = None,\n"
+                    "    personality: str = \"\",\n"
+                    "    autonomy_policy: dict | None = None,\n"
+                    "    primary_model_id: str | None = None,\n"
+                    "    max_tokens_per_day: int | None = None,\n"
+                    "    max_tokens_per_month: int | None = None,\n"
+                    ") -> dict:\n"
+                    '    """Create a new digital employee via POST /api/agents/.\n\n'
+                    '    Returns the created agent dict (includes "api_key" for openclaw agents).\n'
+                    '    Raises RuntimeError on failure.\n'
+                    "    \"\"\"\n"
+                    "    api_url = os.environ.get(\n"
+                    '        "CLAWITH_API_URL",\n'
+                    '        "http://localhost:8000/api/agents/"\n'
+                    "    )\n"
+                    "    api_key = os.environ.get(\"AGENT_API_KEY\")\n"
+                    "    if not api_key:\n"
+                    '        raise RuntimeError("AGENT_API_KEY environment variable not set")\n\n'
+                    "    payload = {\n"
+                    '        "name": name,\n'
+                    '        "role_description": role_description,\n'
+                    '        "agent_type": agent_type,\n'
+                    "    }\n"
+                    "    if bio is not None:\n"
+                    '        payload["bio"] = bio\n'
+                    "    if personality:\n"
+                    '        payload["personality"] = personality\n'
+                    "    if autonomy_policy:\n"
+                    '        payload["autonomy_policy"] = autonomy_policy\n'
+                    "    if primary_model_id:\n"
+                    '        payload["primary_model_id"] = primary_model_id\n'
+                    "    if max_tokens_per_day is not None:\n"
+                    '        payload["max_tokens_per_day"] = max_tokens_per_day\n'
+                    "    if max_tokens_per_month is not None:\n"
+                    '        payload["max_tokens_per_month"] = max_tokens_per_month\n\n'
+                    "    data = json.dumps(payload).encode(\"utf-8\")\n"
+                    "    req = urllib.request.Request(\n"
+                    "        api_url,\n"
+                    "        data=data,\n"
+                    "        headers={\n"
+                    '            "Content-Type": "application/json",\n'
+                    '            "X-Api-Key": api_key,\n'
+                    "        },\n"
+                    "        method=\"POST\",\n"
+                    "    )\n"
+                    "    with urllib.request.urlopen(req, timeout=30) as resp:\n"
+                    "        return json.loads(resp.read().decode(\"utf-8\"))\n"
+                ),
+            },
+        ],
+    },
 ]
 
 
