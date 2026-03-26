@@ -34,6 +34,7 @@ class TenantOut(BaseModel):
     im_provider: str
     timezone: str = "UTC"
     is_active: bool
+    allow_agent_creation_by_agents: bool = False
     created_at: datetime | None = None
 
     model_config = {"from_attributes": True}

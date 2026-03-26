@@ -57,6 +57,7 @@ class UserUpdate(BaseModel):
 
 class AgentCreate(BaseModel):
     name: str = Field(min_length=2, max_length=100, description="Agent name, 2-100 characters")
+    role_name: str = Field(min_length=1, max_length=100, description="Role name in both English and Chinese, e.g., 'Data Analyst / 数据分析师'")
     agent_type: str = "native"  # native | openclaw
     role_description: str = Field(default="", max_length=500, description="Role description, max 500 characters")
     bio: str | None = None

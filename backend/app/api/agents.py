@@ -194,6 +194,7 @@ async def create_agent(
 
     agent = Agent(
         name=data.name,
+        role_name=data.role_name,
         role_description=data.role_description,
         bio=data.bio,
         avatar_url=data.avatar_url,

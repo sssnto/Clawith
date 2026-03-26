@@ -1642,9 +1642,6 @@ export default function EnterpriseSettings() {
                         {/* ── 0.5. Company Timezone ── */}
                         <CompanyTimezoneEditor key={`tz-${selectedTenantId}`} />
 
-                        {/* ── Agent Creation Toggle ── */}
-                        <AgentCreationToggle key={`agent-creation-${selectedTenantId}`} />
-
                         {/* ── 1. Company Intro ── */}
                         <h3 style={{ marginBottom: '8px' }}>{t('enterprise.companyIntro.title', 'Company Intro')}</h3>
                         <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
@@ -1886,6 +1883,11 @@ export default function EnterpriseSettings() {
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
                                 <h3>{t('enterprise.tools.title')}</h3>
                                 <button className="btn btn-primary" onClick={() => setShowAddMCP(true)}>+ {t('enterprise.tools.addMcpServer')}</button>
+                            </div>
+
+                            {/* ── Agent Creation Permission ── */}
+                            <div className="card" style={{ padding: '16px', marginBottom: '16px' }}>
+                                <AgentCreationToggle key={`agent-creation-${selectedTenantId}`} />
                             </div>
 
                             {showAddMCP && (

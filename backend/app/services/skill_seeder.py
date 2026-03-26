@@ -597,109 +597,75 @@ This skill allows you to create new digital employees on the Clawith platform by
 
 ## How to Create an Agent
 
-Use the `create_agent` function provided in `scripts/agent_creator.py`.
+Use the built-in `create_agent` tool function. It is automatically available to you - just call it when needed.
 
 ### Required Parameters
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `name` | string | Agent's display name (2-100 chars) |
+| `role_name` | string | Role name in English and Chinese (e.g. "Data Analyst / 数据分析师") |
 | `role_description` | string | What the agent does (max 500 chars) |
 | `agent_type` | string | `"native"` or `"openclaw"` (default: `"native"`) |
 | `bio` | string (optional) | Short biography |
-| `personality` | string (optional) | Personality traits |
-| `primary_model_id` | UUID (optional) | LLM model to use |
+| `personality` | string (optional) | Core identity and personality traits |
+| `boundaries` | string (optional) | Behavioral boundaries and constraints |
 
 ### Optional Parameters
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `autonomy_policy` | dict | Autonomy level for each capability |
-| `max_tokens_per_day` | int | Daily token budget |
-| `max_tokens_per_month` | int | Monthly token budget |
-| `skill_ids` | list[UUID] | IDs of skills to install |
 
 ## Example Usage
 
-```python
-import json
-import urllib.request
-import os
-
-api_url = "http://localhost:8000/api/agents/"
-api_key = os.environ.get("AGENT_API_KEY")
-if not api_key:
-    raise RuntimeError("AGENT_API_KEY not set")
-
-payload = {
-    "name": "Research Assistant",
-    "role_description": "Helps with web research and information gathering",
-    "agent_type": "native"
+```
+Tool: create_agent
+{
+  "name": "Research Assistant",
+  "role_name": "Research Analyst / 研究分析师",
+  "role_description": "Helps with web research and information gathering",
+  "agent_type": "native"
 }
+```
 
-data = json.dumps(payload).encode("utf-8")
-req = urllib.request.Request(
-    api_url,
-    data=data,
-    headers={
-        "Content-Type": "application/json",
-        "X-Api-Key": api_key,
-    },
-    method="POST",
-)
-with urllib.request.urlopen(req, timeout=30) as resp:
-    result = json.loads(resp.read().decode("utf-8"))
-    print(f"Agent created: {result['id']}")
+### Agent with Personality and Boundaries
+
+```
+Tool: create_agent
+{
+  "name": "Data Analyst",
+  "role_description": "Analyzes data and generates reports",
+  "agent_type": "native",
+  "personality": "细心谨慎, 善于分析数据, 喜欢用图表展示结果",
+  "boundaries": "不主动发起外部联系, 仅在明确授权时访问敏感信息"
+}
 ```
 
 ### Specialized Agent with Autonomy
 
-```python
-import json
-import urllib.request
-import os
-
-api_url = "http://localhost:8000/api/agents/"
-api_key = os.environ.get("AGENT_API_KEY")
-
-payload = {
-    "name": "Data Analyst",
-    "role_description": "Analyzes data and generates reports",
-    "agent_type": "native",
-    "autonomy_policy": {
-        "read_files": "L1",
-        "write_workspace_files": "L2",
-        "send_feishu_message": "L2"
-    }
+```
+Tool: create_agent
+{
+  "name": "Data Analyst",
+  "role_description": "Analyzes data and generates reports",
+  "agent_type": "native",
+  "autonomy_policy": {
+    "read_files": "L1",
+    "write_workspace_files": "L2"
+  }
 }
-
-data = json.dumps(payload).encode("utf-8")
-req = urllib.request.Request(api_url, data=data, headers={"Content-Type": "application/json", "X-Api-Key": api_key}, method="POST")
-with urllib.request.urlopen(req, timeout=30) as resp:
-    result = json.loads(resp.read().decode("utf-8"))
 ```
 
 ### OpenClaw Agent (has API key)
 
-```python
-import json
-import urllib.request
-import os
-
-api_url = "http://localhost:8000/api/agents/"
-api_key = os.environ.get("AGENT_API_KEY")
-
-payload = {
-    "name": "API Agent",
-    "role_description": "Can interact with external APIs",
-    "agent_type": "openclaw"
+```
+Tool: create_agent
+{
+  "name": "API Agent",
+  "role_description": "Can interact with external APIs",
+  "agent_type": "openclaw"
 }
-
-data = json.dumps(payload).encode("utf-8")
-req = urllib.request.Request(api_url, data=data, headers={"Content-Type": "application/json", "X-Api-Key": api_key}, method="POST")
-with urllib.request.urlopen(req, timeout=30) as resp:
-    result = json.loads(resp.read().decode("utf-8"))
-    print(f"API Key: {result.get('api_key')} — Save this, it's only shown once!")
 ```
 
 ## Output Format

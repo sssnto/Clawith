@@ -20,6 +20,7 @@ class Agent(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
+    role_name: Mapped[str | None] = mapped_column(String(100), default=None)
     avatar_url: Mapped[str | None] = mapped_column(String(500))
     role_description: Mapped[str] = mapped_column(String(500), default="")
     bio: Mapped[str | None] = mapped_column(Text)
