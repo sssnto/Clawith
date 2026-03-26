@@ -144,13 +144,17 @@ async def create_agent(
     When an agent creates an employee, the new employee's creator_id is set to
     the creating agent's human owner, and the tenant is inherited from the creator.
     """
-    from app.services.quota_guard import check_agent_creation_quota, QuotaExceeded
+    from app.services.quota_guard import check_agent_creation_quota, check_tenant_allows_agent_creation, QuotaExceeded
 
     is_agent_actor = isinstance(actor, Agent)
 
     if is_agent_actor:
         creator_id = actor.creator_id
         target_tenant_id = actor.tenant_id
+        try:
+            await check_tenant_allows_agent_creation(target_tenant_id)
+        except QuotaExceeded as e:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=e.message)
     else:
         creator_id = actor.id
         target_tenant_id = actor.tenant_id
