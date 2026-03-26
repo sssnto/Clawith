@@ -1,10 +1,12 @@
 """Security utilities: JWT, password hashing, and authentication dependencies."""
 
+import hashlib
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Union
 
 import bcrypt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from sqlalchemy import select
@@ -71,6 +73,52 @@ async def get_current_user(
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
     return user
+
+
+async def get_current_user_or_agent(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Union["User", "Agent"]:
+    """Dependency that accepts either JWT (human user) or X-Api-Key (OpenClaw agent).
+
+    Returns a User for JWT auth or an Agent for API key auth.
+    When an OpenClaw agent makes the request, its Agent object is returned.
+    """
+    from app.models.user import User
+    from app.models.agent import Agent
+
+    auth_header = request.headers.get("Authorization", "")
+    api_key = request.headers.get("X-Api-Key")
+
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+        try:
+            payload = decode_access_token(token)
+            user_id = payload.get("sub")
+            if user_id:
+                result = await db.execute(select(User).where(User.id == uuid.UUID(user_id)))
+                user = result.scalar_one_or_none()
+                if user and user.is_active:
+                    return user
+        except HTTPException:
+            pass
+
+    if api_key:
+        key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+        result = await db.execute(
+            select(Agent).where(
+                Agent.api_key_hash.in_([api_key, key_hash]),
+                Agent.agent_type == "openclaw",
+            )
+        )
+        agent = result.scalar_one_or_none()
+        if agent:
+            return agent
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid credentials — provide JWT Bearer token or X-Api-Key",
+    )
 
 
 async def get_current_admin(current_user=Depends(get_current_user)):
