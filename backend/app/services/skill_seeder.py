@@ -603,12 +603,11 @@ Use the built-in `create_agent` tool function. It is automatically available to 
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `name` | string | Agent's display name (2-100 chars) |
-| `role_name` | string | Role name in English and Chinese (e.g. "Data Analyst / 数据分析师") |
-| `role_description` | string | What the agent does (max 500 chars) |
+| `name` | string | Agent's display name, like a person's name (e.g. "小李", "Alice") |
+| `role_description` | string | Brief one-line summary of main responsibilities (max 100 chars) |
 | `agent_type` | string | `"native"` or `"openclaw"` (default: `"native"`) |
 | `bio` | string (optional) | Short biography |
-| `personality` | string (optional) | Core identity and personality traits |
+| `personality` | string (optional) | Detailed core identity: responsibilities, reporting relationships, work content, personality traits |
 | `boundaries` | string (optional) | Behavioral boundaries and constraints |
 
 ### Optional Parameters
@@ -623,7 +622,6 @@ Use the built-in `create_agent` tool function. It is automatically available to 
 Tool: create_agent
 {
   "name": "Research Assistant",
-  "role_name": "Research Analyst / 研究分析师",
   "role_description": "Helps with web research and information gathering",
   "agent_type": "native"
 }
@@ -634,10 +632,9 @@ Tool: create_agent
 ```
 Tool: create_agent
 {
-  "name": "Data Analyst",
-  "role_description": "Analyzes data and generates reports",
-  "agent_type": "native",
-  "personality": "细心谨慎, 善于分析数据, 喜欢用图表展示结果",
+  "name": "小李",
+  "role_description": "负责公司整体运营管理",
+  "personality": "负责公司整体运营管理工作，包括业务流程优化、运营数据分析、跨部门协调、项目进度跟踪和运营效率提升。向CEO直接汇报，确保公司运营目标达成。性格细心谨慎，善于发现流程瓶颈，喜欢用数据驱动决策。",
   "boundaries": "不主动发起外部联系, 仅在明确授权时访问敏感信息"
 }
 ```

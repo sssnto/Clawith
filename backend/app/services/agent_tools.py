@@ -890,10 +890,6 @@ AGENT_TOOLS = [
                         "type": "string",
                         "description": "Display name for the new agent (2-100 characters)",
                     },
-                    "role_name": {
-                        "type": "string",
-                        "description": "Role name in both English and Chinese, e.g. 'Data Analyst / 数据分析师'",
-                    },
                     "role_description": {
                         "type": "string",
                         "description": "What the agent does, its responsibilities and capabilities (max 500 characters)",
@@ -920,7 +916,7 @@ AGENT_TOOLS = [
                         "description": "Optional autonomy levels for capabilities, e.g. {'read_files': 'L1', 'write_workspace_files': 'L2', 'send_feishu_message': 'L2'}",
                     },
                 },
-                "required": ["name", "role_name", "role_description"],
+                "required": ["name", "role_description"],
             },
         },
     },
@@ -5568,7 +5564,6 @@ async def _create_agent_tool(calling_agent_id: uuid.UUID, arguments: dict) -> st
     from app.services.quota_guard import check_tenant_allows_agent_creation, QuotaExceeded
 
     name = arguments.get("name", "").strip()
-    role_name = arguments.get("role_name", "").strip() or None
     role_description = arguments.get("role_description", "").strip()
     agent_type = arguments.get("agent_type", "native")
     bio = arguments.get("bio")
@@ -5580,8 +5575,6 @@ async def _create_agent_tool(calling_agent_id: uuid.UUID, arguments: dict) -> st
         return "❌ Agent name must be at least 2 characters"
     if len(name) > 100:
         return "❌ Agent name must be at most 100 characters"
-    if not role_name:
-        return "❌ Role name is required (e.g. 'Data Analyst / 数据分析师')"
     if not role_description:
         return "❌ Role description is required"
     if len(role_description) > 500:
@@ -5627,7 +5620,6 @@ async def _create_agent_tool(calling_agent_id: uuid.UUID, arguments: dict) -> st
 
             new_agent = AgentModel(
                 name=name,
-                role_name=role_name,
                 role_description=role_description,
                 bio=bio,
                 creator_id=creator_id,
