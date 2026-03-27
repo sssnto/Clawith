@@ -295,13 +295,26 @@ class AgentBayClient:
             await self.create_session("linux_latest")
 
     async def computer_screenshot(self) -> dict:
-        """Take a screenshot of the desktop."""
+        """Take a screenshot of the desktop.
+
+        Tries the standard screenshot() API first, then falls back to
+        beta_take_screenshot() for cloud environments that don't support
+        the standard API yet.
+        """
         await self._ensure_computer_session()
         
         # Wait briefly for UI animations/rendering to settle
         await asyncio.sleep(2)
-        
-        result = await asyncio.to_thread(self._session.computer.screenshot)
+
+        try:
+            result = await asyncio.to_thread(self._session.computer.screenshot)
+        except Exception as e:
+            # Some cloud environments only support beta_take_screenshot()
+            if "beta_take_screenshot" in str(e):
+                logger.info("[AgentBay] Falling back to beta_take_screenshot()")
+                result = await asyncio.to_thread(self._session.computer.beta_take_screenshot)
+            else:
+                raise
         return {
             "success": result.success,
             "data": getattr(result, "data", None),
