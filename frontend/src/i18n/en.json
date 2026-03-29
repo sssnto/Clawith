@@ -770,7 +770,7 @@
           "step3": "Left sidebar → Credentials & Basic Info → copy App ID and App Secret",
           "step4": "Paste App ID and App Secret below → click Save",
           "step5": "Left sidebar → Permissions & Scopes → click Bulk Import/Export Permissions → paste the permission JSON below → confirm import",
-          "step6": "Left sidebar → App Release → Create Version → Release for Review → approve it in your admin console"
+          "step6": "Left sidebar → App Release → Create Version → set Availability to All Employees → Release for Review → approve it in your admin console"
         },
         "dingtalk": {
           "step1": "Go to open.dingtalk.com → log in → Developer Console → Create Enterprise Internal App → fill in name",
