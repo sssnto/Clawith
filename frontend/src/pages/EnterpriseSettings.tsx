@@ -2561,7 +2561,7 @@ export default function EnterpriseSettings() {
                                             return (
                                                 <div key={category}>
                                                     {/* Category header */}
-                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 14px', marginBottom: '8px' }}>
                                                         <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
                                                             {categoryLabels[category] || category}
                                                         </div>

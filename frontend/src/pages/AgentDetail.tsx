@@ -167,7 +167,7 @@ function ToolsManager({ agentId, canManage = false }: { agentId: string; canMana
     const renderToolGroup = (groupedTools: Record<string, any[]>) =>
         Object.entries(groupedTools).map(([category, catTools]) => (
             <div key={category}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 14px', marginBottom: '8px' }}>
                     <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
                         {getCategoryLabels(t)[category] || category}
                     </div>
