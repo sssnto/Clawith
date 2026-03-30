@@ -1209,7 +1209,7 @@ function AgentDetailInner() {
     const wsRef = useRef<WebSocket | null>(null);
     const chatEndRef = useRef<HTMLDivElement>(null);
     const chatContainerRef = useRef<HTMLDivElement>(null);
-    const chatInputRef = useRef<HTMLInputElement>(null);
+    const chatInputRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     // Settings form local state
@@ -1685,6 +1685,12 @@ function AgentDetailInner() {
         }));
 
         setChatInput('');
+        // Reset textarea height to single line after sending
+        requestAnimationFrame(() => {
+            if (chatInputRef.current) {
+                chatInputRef.current.style.height = 'auto';
+            }
+        });
         setAttachedFiles([]);
     };
 
@@ -3674,11 +3680,41 @@ function AgentDetailInner() {
                                                     <button onClick={() => { uploadAbortRef.current?.(); }} style={{ background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: '12px', padding: '0 2px', lineHeight: 1 }} title="Cancel upload">✕</button>
                                                 </div>
                                             )}
-                                            <input ref={chatInputRef} className="chat-input" value={chatInput} onChange={e => setChatInput(e.target.value)}
-                                                onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && !isWaiting && !isStreaming) { e.preventDefault(); sendChatMsg(); } }}
+                                            <textarea
+                                                ref={chatInputRef}
+                                                className="chat-input"
+                                                value={chatInput}
+                                                onChange={e => {
+                                                    setChatInput(e.target.value);
+                                                    // Auto-resize: reset then expand up to ~5 lines (130px)
+                                                    requestAnimationFrame(() => {
+                                                        const el = chatInputRef.current;
+                                                        if (!el) return;
+                                                        el.style.height = 'auto';
+                                                        el.style.height = Math.min(el.scrollHeight, 130) + 'px';
+                                                    });
+                                                }}
+                                                onKeyDown={e => {
+                                                    // Ctrl+Enter (or Cmd+Enter on Mac) sends; plain Enter inserts newline
+                                                    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.nativeEvent.isComposing && !isWaiting && !isStreaming) {
+                                                        e.preventDefault();
+                                                        sendChatMsg();
+                                                    }
+                                                }}
                                                 onPaste={handlePaste}
                                                 placeholder={!wsConnected && (!activeSession?.user_id || !currentUser || activeSession.user_id === String(currentUser?.id)) ? 'Connecting...' : attachedFiles.length > 0 ? t('agent.chat.askAboutFile', { name: attachedFiles.length === 1 ? attachedFiles[0].name : `${attachedFiles.length} files` }) : t('chat.placeholder')}
-                                                disabled={!wsConnected} style={{ flex: 1 }} autoFocus />
+                                                disabled={!wsConnected}
+                                                rows={1}
+                                                style={{
+                                                    flex: 1,
+                                                    resize: 'none',
+                                                    overflow: 'hidden',
+                                                    lineHeight: '22px',
+                                                    paddingTop: '7px',
+                                                    paddingBottom: '7px',
+                                                }}
+                                                autoFocus
+                                            />
                                             {(isStreaming || isWaiting) ? (
                                                 <button className="btn btn-stop-generation" onClick={() => {
                                                     if (!id || !activeSession?.id) return;
