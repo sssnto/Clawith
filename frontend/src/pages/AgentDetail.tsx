@@ -565,10 +565,30 @@ function CopyMessageButton({ text }: { text: string }) {
     const [copied, setCopied] = React.useState(false);
     const handleCopy = (e: React.MouseEvent) => {
         e.stopPropagation();
-        navigator.clipboard.writeText(text).then(() => {
+        const copySuccess = () => {
             setCopied(true);
             setTimeout(() => setCopied(false), 1500);
-        });
+        };
+        
+        if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text).then(copySuccess).catch(err => console.error('Clipboard API failed', err));
+        } else {
+            // Fallback for non-HTTPS dev environments
+            const textArea = document.createElement("textarea");
+            textArea.value = text;
+            textArea.style.position = "fixed";  // Avoid scrolling to bottom
+            document.body.appendChild(textArea);
+            textArea.focus();
+            textArea.select();
+            try {
+                if (document.execCommand('copy')) {
+                    copySuccess();
+                }
+            } catch (err) {
+                console.error('Fallback copy failed', err);
+            }
+            document.body.removeChild(textArea);
+        }
     };
     return (
         <button
