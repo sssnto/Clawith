@@ -5048,6 +5048,45 @@ async def _get_feishu_tenant_doc_url(tenant_token: str, doc_token: str, doc_type
     return f"https://feishu.cn/{doc_type}/{doc_token}"
 
 
+
+
+async def _get_feishu_bitable_url(tenant_token: str, app_token: str, table_id: str = "") -> str:
+    """Build a user-accessible Bitable URL using the tenant's actual domain.
+
+    Constructs https://{tenant_domain}/base/{app_token}?table={table_id}
+    Falls back to https://feishu.cn/base/{app_token} if domain resolution fails.
+
+    Args:
+        tenant_token: A valid tenant_access_token.
+        app_token:    The Bitable app token.
+        table_id:     Optional table ID to deep-link to a specific sheet.
+    Returns:
+        A fully-formed URL string.
+    """
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://open.feishu.cn/open-apis/tenant/v2/tenant/query",
+                headers={"Authorization": f"Bearer {tenant_token}"},
+            )
+        data = resp.json()
+        if data.get("code") == 0:
+            domain = data.get("data", {}).get("tenant", {}).get("domain", "")
+            if domain:
+                base_url = f"https://{domain}/base/{app_token}"
+                if table_id:
+                    base_url += f"?table={table_id}"
+                return base_url
+    except Exception:
+        pass
+    # Fallback
+    base_url = f"https://feishu.cn/base/{app_token}"
+    if table_id:
+        base_url += f"?table={table_id}"
+    return base_url
+
+
 def _parse_feishu_url(url: str) -> dict:
     """Parse various Feishu URLs to extract tokens.
     Supports Bitable (table, view) and Docx.
@@ -5144,7 +5183,10 @@ async def _bitable_list_tables(agent_id: uuid.UUID, arguments: dict) -> str:
         if not tables:
             return "OK: No tables found in this Bitable."
         lines = [f"- {t.get('name')} (ID: {t.get('table_id')})" for t in tables]
-        return "OK: Tables in this Bitable:\n" + "\n".join(lines)
+        # Provide a user-accessible link so the user can open the Bitable directly
+        tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
+        bitable_url = await _get_feishu_bitable_url(tenant_token, app_token)
+        return "OK: Tables in this Bitable:\n" + "\n".join(lines) + f"\n\n🔗 多维表格链接: {bitable_url}"
     except Exception as e:
         return f"Failed: {str(e)[:300]}"
 
@@ -5246,7 +5288,14 @@ async def _bitable_create_record(agent_id: uuid.UUID, arguments: dict) -> str:
         if err: return err
         
         record = resp.get("data", {}).get("record", {})
-        return f"OK: Record created. Record ID: {record.get('record_id')}\nFields: {json.dumps(record.get('fields', {}), ensure_ascii=False)}"
+        # Provide a user-accessible link so they can verify the new row in the table
+        tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
+        bitable_url = await _get_feishu_bitable_url(tenant_token, app_token, table_id)
+        return (
+            f"OK: Record created. Record ID: {record.get('record_id')}\n"
+            f"Fields: {json.dumps(record.get('fields', {}), ensure_ascii=False)}\n"
+            f"🔗 多维表格链接: {bitable_url}"
+        )
     except Exception as e:
         return f"Failed: {str(e)[:300]}"
 
@@ -5278,7 +5327,14 @@ async def _bitable_update_record(agent_id: uuid.UUID, arguments: dict) -> str:
         if err: return err
         
         record = resp.get("data", {}).get("record", {})
-        return f"OK: Record updated. Record ID: {record.get('record_id')}\nFields: {json.dumps(record.get('fields', {}), ensure_ascii=False)}"
+        # Provide a user-accessible link so they can verify the updated row
+        tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
+        bitable_url = await _get_feishu_bitable_url(tenant_token, app_token, table_id)
+        return (
+            f"OK: Record updated. Record ID: {record.get('record_id')}\n"
+            f"Fields: {json.dumps(record.get('fields', {}), ensure_ascii=False)}\n"
+            f"🔗 多维表格链接: {bitable_url}"
+        )
     except Exception as e:
         return f"Failed: {str(e)[:300]}"
 
@@ -5302,7 +5358,10 @@ async def _bitable_delete_record(agent_id: uuid.UUID, arguments: dict) -> str:
         err = _check_feishu_err(resp)
         if err: return err
         
-        return f"OK: Record {record_id} deleted successfully."
+        # Provide a user-accessible link so they can verify the deletion
+        tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
+        bitable_url = await _get_feishu_bitable_url(tenant_token, app_token, table_id)
+        return f"OK: Record {record_id} deleted successfully.\n🔗 多维表格链接: {bitable_url}"
     except Exception as e:
         return f"Failed: {str(e)[:300]}"
 
