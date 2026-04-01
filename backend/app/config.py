@@ -5,6 +5,8 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings
 
+from app.services.sandbox.config import SandboxConfig, SandboxType
+
 
 def _running_in_container() -> bool:
     """Best-effort container runtime detection."""
@@ -62,6 +64,9 @@ class Settings(BaseSettings):
     JWT_SECRET_KEY: str = "change-me-jwt-secret"
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
+    PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 60
+    EMAIL_VERIFICATION_TOKEN_EXPIRE_MINUTES: int = 60  # 1 hour
+    EMAIL_VERIFICATION_REQUIRED: bool = False  # Require email verification for login
 
     # File Storage
     AGENT_DATA_DIR: str = _default_agent_data_dir()
@@ -76,12 +81,24 @@ class Settings(BaseSettings):
     FEISHU_APP_ID: str = ""
     FEISHU_APP_SECRET: str = ""
     FEISHU_REDIRECT_URI: str = ""
+    PUBLIC_BASE_URL: str = ""
 
     # CORS
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173"]
 
     # Jina AI (Reader + Search APIs)
     JINA_API_KEY: str = ""
+
+
+    # Sandbox configuration
+    SANDBOX_TYPE: SandboxType = SandboxType.SUBPROCESS
+    SANDBOX_API_KEY: str = ""
+    SANDBOX_API_URL: str = ""
+    SANDBOX_CPU_LIMIT: str = "0.5"
+    SANDBOX_MEMORY_LIMIT: str = "256m"
+    SANDBOX_ALLOW_NETWORK: bool = False
+    SANDBOX_DEFAULT_TIMEOUT: int = 30
+    SANDBOX_MAX_TIMEOUT: int = 60
 
     model_config = {
         "env_file": [".env", "../.env"],
@@ -95,3 +112,19 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Get cached application settings."""
     return Settings()
+
+
+def get_sandbox_config() -> SandboxConfig:
+    """Create SandboxConfig from application settings."""
+    settings = get_settings()
+    return SandboxConfig(
+        type=settings.SANDBOX_TYPE,
+        enabled=True,
+        api_key=settings.SANDBOX_API_KEY,
+        api_url=settings.SANDBOX_API_URL,
+        cpu_limit=settings.SANDBOX_CPU_LIMIT,
+        memory_limit=settings.SANDBOX_MEMORY_LIMIT,
+        allow_network=settings.SANDBOX_ALLOW_NETWORK,
+        default_timeout=settings.SANDBOX_DEFAULT_TIMEOUT,
+        max_timeout=settings.SANDBOX_MAX_TIMEOUT,
+    )

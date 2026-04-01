@@ -1,24 +1,59 @@
 """Security utilities: JWT, password hashing, and authentication dependencies."""
 
+import base64
 import hashlib
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Union
 
 import bcrypt
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.database import get_db
 
 settings = get_settings()
 
-# Bearer token scheme
 security = HTTPBearer()
+
+
+def encrypt_data(plaintext: str, key: str) -> str:
+    """Encrypt a string using AES-256-CBC with the given key."""
+    if not plaintext:
+        return ""
+    key_bytes = key.encode("utf-8")
+    aes_key = hashlib.sha256(key_bytes).digest()
+    iv = os.urandom(16)
+    cipher = AES.new(aes_key, AES.MODE_CBC, iv)
+    padded_data = pad(plaintext.encode("utf-8"), AES.block_size)
+    encrypted = cipher.encrypt(padded_data)
+    result = base64.b64encode(iv + encrypted).decode("utf-8")
+    return result
+
+
+def decrypt_data(ciphertext: str, key: str) -> str:
+    """Decrypt a string encrypted with encrypt_data."""
+    if not ciphertext:
+        return ""
+    try:
+        raw = base64.b64decode(ciphertext)
+        iv = raw[:16]
+        encrypted = raw[16:]
+        aes_key = hashlib.sha256(key.encode("utf-8")).digest()
+        cipher = AES.new(aes_key, AES.MODE_CBC, iv)
+        padded_data = cipher.decrypt(encrypted)
+        plaintext = unpad(padded_data, AES.block_size).decode("utf-8")
+        return plaintext
+    except Exception as e:
+        raise ValueError(f"Decryption failed: {e}") from e
 
 
 def hash_password(password: str) -> str:
@@ -60,7 +95,7 @@ async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: AsyncSession = Depends(get_db),
 ):
-    """Dependency to get the current authenticated user."""
+    """Dependency to get the current authenticated and active user."""
     from app.models.user import User
 
     payload = decode_access_token(credentials.credentials)
@@ -68,7 +103,11 @@ async def get_current_user(
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
-    result = await db.execute(select(User).where(User.id == uuid.UUID(user_id)))
+    result = await db.execute(
+        select(User)
+        .where(User.id == uuid.UUID(user_id))
+        .options(selectinload(User.identity))
+    )
     user = result.scalar_one_or_none()
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
@@ -119,6 +158,29 @@ async def get_current_user_or_agent(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid credentials — provide JWT Bearer token or X-Api-Key",
     )
+
+
+async def get_authenticated_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: AsyncSession = Depends(get_db),
+):
+    """Dependency to get the current authenticated user (even if not active yet)."""
+    from app.models.user import User
+
+    payload = decode_access_token(credentials.credentials)
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    result = await db.execute(
+        select(User)
+        .where(User.id == uuid.UUID(user_id))
+        .options(selectinload(User.identity))
+    )
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    return user
 
 
 async def get_current_admin(current_user=Depends(get_current_user)):

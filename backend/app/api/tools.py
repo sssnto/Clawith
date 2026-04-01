@@ -15,6 +15,95 @@ from app.models.user import User
 router = APIRouter(prefix="/tools", tags=["tools"])
 
 
+# Sensitive field keys that should be encrypted when stored.
+# This is used as a FALLBACK for tools that don't have config_schema.
+# When config_schema is available, fields with type='password' are used instead.
+SENSITIVE_FIELD_KEYS = {"api_key", "private_key", "auth_code", "password", "secret"}
+
+
+def _get_sensitive_keys(config_schema: dict | None = None) -> set[str]:
+    """Determine which config keys are sensitive.
+
+    If config_schema is provided, extract keys whose field type is 'password'.
+    Always includes the hardcoded SENSITIVE_FIELD_KEYS as a fallback so that
+    tools without config_schema still get encrypted/decrypted correctly.
+    """
+    keys = set(SENSITIVE_FIELD_KEYS)
+    if config_schema:
+        for field in config_schema.get("fields", []):
+            if field.get("type") == "password":
+                keys.add(field.get("key", ""))
+    keys.discard("")  # remove empty string if any
+    return keys
+
+
+def _encrypt_sensitive_fields(config: dict, config_schema: dict | None = None) -> dict:
+    """Encrypt sensitive fields in config dict.
+
+    Args:
+        config: Tool config dict
+        config_schema: Optional config_schema to extract password-type field keys
+
+    Returns:
+        Config dict with sensitive fields encrypted
+    """
+    from app.core.security import encrypt_data
+    from app.config import get_settings
+
+    if not config:
+        return config
+
+    settings = get_settings()
+    result = dict(config)
+    sensitive_keys = _get_sensitive_keys(config_schema)
+
+    for key in sensitive_keys:
+        if key in result and result[key]:
+            # Only encrypt if not already encrypted (check if it looks like base64)
+            value = result[key]
+            if isinstance(value, str) and value:
+                try:
+                    result[key] = encrypt_data(value, settings.SECRET_KEY)
+                except Exception:
+                    # If encryption fails, keep the value as-is
+                    pass
+
+    return result
+
+
+def _decrypt_sensitive_fields(config: dict, config_schema: dict | None = None) -> dict:
+    """Decrypt sensitive fields in config dict.
+
+    Args:
+        config: Tool config dict
+        config_schema: Optional config_schema to extract password-type field keys
+
+    Returns:
+        Config dict with sensitive fields decrypted
+    """
+    from app.core.security import decrypt_data
+    from app.config import get_settings
+
+    if not config:
+        return config
+
+    settings = get_settings()
+    result = dict(config)
+    sensitive_keys = _get_sensitive_keys(config_schema)
+
+    for key in sensitive_keys:
+        if key in result and result[key]:
+            value = result[key]
+            if isinstance(value, str) and value:
+                try:
+                    result[key] = decrypt_data(value, settings.SECRET_KEY)
+                except Exception:
+                    # If decryption fails, assume it's plaintext
+                    pass
+
+    return result
+
+
 # ─── Schemas ────────────────────────────────────────────────
 class ToolCreate(BaseModel):
     name: str
@@ -47,6 +136,10 @@ class AgentToolUpdate(BaseModel):
     enabled: bool
 
 
+class CategoryConfigUpdate(BaseModel):
+    config: dict
+
+
 # ─── Global Tool CRUD ──────────────────────────────────────
 @router.get("")
 async def list_tools(
@@ -55,17 +148,15 @@ async def list_tools(
     db: AsyncSession = Depends(get_db),
 ):
     """List platform tools scoped by tenant (builtin + tenant-specific)."""
-    from sqlalchemy import or_ as _or
-    # Exclude tools that were installed by agents via import_mcp_server
-    agent_installed_tids = select(AgentTool.tool_id).where(AgentTool.source == "user_installed")
     query = (
         select(Tool)
-        .where(~Tool.id.in_(agent_installed_tids))
+        .where(Tool.source.in_(["builtin", "admin"]))
         .order_by(Tool.category, Tool.name)
     )
     # Scope by tenant: show builtin (tenant_id is NULL) + tenant-specific tools
     tid = tenant_id or (str(current_user.tenant_id) if current_user.tenant_id else None)
     if tid:
+        from sqlalchemy import or_ as _or
         query = query.where(_or(Tool.tenant_id == None, Tool.tenant_id == uuid.UUID(tid)))
     result = await db.execute(query)
     tools = result.scalars().all()
@@ -84,7 +175,8 @@ async def list_tools(
             "mcp_tool_name": t.mcp_tool_name,
             "enabled": t.enabled,
             "is_default": t.is_default,
-            "config": t.config or {},
+            # Decrypt config for the admin UI so saved values are readable
+            "config": _decrypt_sensitive_fields(t.config or {}, t.config_schema),
             "config_schema": t.config_schema or {},
             "created_at": t.created_at.isoformat() if t.created_at else None,
         }
@@ -113,10 +205,10 @@ async def create_tool(
         icon=data.icon,
         parameters_schema=data.parameters_schema,
         mcp_server_url=data.mcp_server_url,
-        mcp_server_name=data.mcp_server_name,
         mcp_tool_name=data.mcp_tool_name,
         is_default=data.is_default,
         tenant_id=current_user.tenant_id,
+        source="admin",
     )
     db.add(tool)
     await db.commit()
@@ -137,8 +229,36 @@ async def update_tool(
     if not tool:
         raise HTTPException(status_code=404, detail="Tool not found")
 
-    for field, value in data.model_dump(exclude_unset=True).items():
+    update_data = data.model_dump(exclude_unset=True)
+    # Encrypt sensitive fields in config
+    if "config" in update_data and update_data["config"]:
+        update_data["config"] = _encrypt_sensitive_fields(update_data["config"], tool.config_schema)
+
+    for field, value in update_data.items():
         setattr(tool, field, value)
+    await db.commit()
+    return {"ok": True}
+
+
+class BulkToolUpdateItem(BaseModel):
+    tool_id: str
+    enabled: bool
+
+@router.put("/bulk")
+async def update_tools_bulk(
+    updates: list[BulkToolUpdateItem],
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk update the enabled status of multiple tools."""
+    tool_ids = [uuid.UUID(u.tool_id) for u in updates]
+    result = await db.execute(select(Tool).where(Tool.id.in_(tool_ids)))
+    tools_map = {str(t.id): t for t in result.scalars().all()}
+    
+    for update in updates:
+        if update.tool_id in tools_map:
+            tools_map[update.tool_id].enabled = update.enabled
+            
     await db.commit()
     return {"ok": True}
 
@@ -189,8 +309,9 @@ async def get_agent_tools(
             continue
         tid = str(t.id)
         at = assignments.get(tid)
-        # MCP tools only show for agents that have an explicit assignment
-        if t.type == "mcp" and not at:
+        # MCP tools installed by agents only show for that agent.
+        # MCP admin tools show for all agents (default disabled).
+        if t.source == "agent" and not at:
             continue
         # If no explicit assignment, use is_default
         enabled = at.enabled if at else t.is_default
@@ -333,7 +454,11 @@ async def get_agent_tool_config(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get merged tool config (global defaults + agent overrides) and config_schema."""
+    """Get merged tool config (global defaults + agent overrides) and config_schema.
+
+    Both configs are decrypted before returning. Global sensitive fields are
+    masked so the frontend can show a key is configured without exposing it.
+    """
     tool_r = await db.execute(select(Tool).where(Tool.id == tool_id))
     tool = tool_r.scalar_one_or_none()
     if not tool:
@@ -342,11 +467,28 @@ async def get_agent_tool_config(
         select(AgentTool).where(AgentTool.agent_id == agent_id, AgentTool.tool_id == tool_id)
     )
     at = at_r.scalar_one_or_none()
-    agent_config = at.config if at else {}
-    merged = {**(tool.config or {}), **(agent_config or {})}
+
+    # Decrypt both configs using the tool's config_schema for field type awareness
+    schema = tool.config_schema
+    raw_global = _decrypt_sensitive_fields(tool.config or {}, schema)
+    raw_agent = _decrypt_sensitive_fields(at.config if at else {}, schema)
+
+    # Mask sensitive fields in global config for display
+    masked_global = dict(raw_global)
+    sensitive_keys = _get_sensitive_keys(schema)
+    for key in sensitive_keys:
+        val = masked_global.get(key)
+        if val and isinstance(val, str) and len(val) > 0:
+            suffix = val[-4:] if len(val) > 4 else val
+            masked_global[key] = f"****{suffix}"
+
+    # Merged: agent overrides take precedence over global defaults.
+    # Use raw (non-masked) global as the base so the agent inherits actual values
+    # at runtime, but the UI will show masked_global for display hints.
+    merged = {**raw_global, **(raw_agent or {})}
     return {
-        "global_config": tool.config or {},
-        "agent_config": agent_config or {},
+        "global_config": masked_global,
+        "agent_config": raw_agent or {},
         "merged_config": merged,
         "config_schema": tool.config_schema or {},
     }
@@ -361,15 +503,28 @@ async def update_agent_tool_config(
     db: AsyncSession = Depends(get_db),
 ):
     """Save per-agent config override for a tool."""
+    # Check permission: only platform_admin and org_admin can modify allow_network
+    if "allow_network" in data.config:
+        if current_user.role not in ("platform_admin", "org_admin"):
+            raise HTTPException(
+                status_code=403,
+                detail="Only platform admin or organization admin can modify network access settings"
+            )
+
+    # Encrypt sensitive fields using the tool's config_schema for field type awareness
+    tool_r2 = await db.execute(select(Tool).where(Tool.id == tool_id))
+    tool_for_schema = tool_r2.scalar_one_or_none()
+    encrypted_config = _encrypt_sensitive_fields(data.config, tool_for_schema.config_schema if tool_for_schema else None)
+
     at_r = await db.execute(
         select(AgentTool).where(AgentTool.agent_id == agent_id, AgentTool.tool_id == tool_id)
     )
     at = at_r.scalar_one_or_none()
     if at:
-        at.config = data.config
+        at.config = encrypted_config
     else:
         # Create assignment if not exists
-        db.add(AgentTool(agent_id=agent_id, tool_id=tool_id, enabled=True, config=data.config))
+        db.add(AgentTool(agent_id=agent_id, tool_id=tool_id, enabled=True, config=encrypted_config))
     await db.commit()
     return {"ok": True}
 
@@ -380,7 +535,16 @@ async def get_agent_tools_with_config(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get agent's enabled tools with per-agent config info and config_schema for settings UI."""
+    """Get agent's enabled tools with per-agent config info and config_schema for settings UI.
+
+    Both global_config and agent_config are decrypted before returning.
+    For global_config, sensitive fields are masked (e.g. "sk-****abcd") so the
+    frontend can show that a company key is configured without exposing it.
+
+    Special handling: some tools (Jina) store their API key in system_settings
+    rather than Tool.config. We resolve those as part of the global config so
+    the agent-level UI can show the inherited key hint.
+    """
     from app.services.agent_tools import _agent_has_feishu
     has_feishu = await _agent_has_feishu(agent_id)
 
@@ -389,6 +553,15 @@ async def get_agent_tools_with_config(
     agent_tools_r = await db.execute(select(AgentTool).where(AgentTool.agent_id == agent_id))
     assignments = {str(at.tool_id): at for at in agent_tools_r.scalars().all()}
 
+    # Pre-fetch system_settings keys that some tools use as an alternative
+    # config storage (e.g. Jina stores its API key in system_settings.jina_api_key)
+    system_keys_cache: dict[str, str] = {}
+    SYSTEM_SETTINGS_TOOL_MAP = {
+        # tool_name -> system_settings key + value path
+        "jina_search": ("jina_api_key", "api_key"),
+        "jina_read": ("jina_api_key", "api_key"),
+    }
+
     result = []
     for t in all_tools:
         # Hide feishu tools for agents without Feishu channel
@@ -396,10 +569,47 @@ async def get_agent_tools_with_config(
             continue
         tid = str(t.id)
         at = assignments.get(tid)
-        # MCP tools only show for agents that have an explicit assignment
-        if t.type == "mcp" and not at:
+        # MCP tools installed by agents only show for that agent.
+        # MCP admin tools show for all agents (default disabled).
+        if t.source == "agent" and not at:
             continue
         enabled = at.enabled if at else t.is_default
+
+        # Decrypt configs for the frontend
+        raw_global = _decrypt_sensitive_fields(t.config or {}, t.config_schema)
+
+        # Fallback: resolve api_key from system_settings for tools that store
+        # their key there (e.g. Jina). Only if Tool.config doesn't have it.
+        if t.name in SYSTEM_SETTINGS_TOOL_MAP and not raw_global.get("api_key"):
+            ss_key, ss_field = SYSTEM_SETTINGS_TOOL_MAP[t.name]
+            if ss_key not in system_keys_cache:
+                try:
+                    from app.models.system_settings import SystemSetting
+                    ss_r = await db.execute(
+                        select(SystemSetting).where(SystemSetting.key == ss_key)
+                    )
+                    ss = ss_r.scalar_one_or_none()
+                    system_keys_cache[ss_key] = (
+                        ss.value.get(ss_field, "") if ss and ss.value else ""
+                    )
+                except Exception:
+                    system_keys_cache[ss_key] = ""
+            if system_keys_cache[ss_key]:
+                raw_global["api_key"] = system_keys_cache[ss_key]
+
+        raw_agent = _decrypt_sensitive_fields((at.config if at else {}) or {}, t.config_schema)
+
+        # Mask sensitive fields in global_config so users can see that a key
+        # is configured at the company level without exposing the full value.
+        masked_global = dict(raw_global)
+        sensitive_keys = _get_sensitive_keys(t.config_schema)
+        for key in sensitive_keys:
+            val = masked_global.get(key)
+            if val and isinstance(val, str) and len(val) > 0:
+                # Show "****" + last 4 chars as a hint
+                suffix = val[-4:] if len(val) > 4 else val
+                masked_global[key] = f"****{suffix}"
+
         result.append({
             "id": tid,
             "agent_tool_id": str(at.id) if at else None,
@@ -413,9 +623,9 @@ async def get_agent_tools_with_config(
             "is_default": t.is_default,
             "mcp_server_name": t.mcp_server_name,
             "config_schema": t.config_schema or {},
-            "global_config": t.config or {},
-            "agent_config": (at.config if at else {}) or {},
-            "source": at.source if at else "system",
+            "global_config": masked_global,
+            "agent_config": raw_agent,
+            "source": t.source,
         })
     return result
 
@@ -456,4 +666,189 @@ async def get_email_providers(
         }
         for key, p in EMAIL_PROVIDERS.items()
     }
+# ─── Tool Category Sharing Config (Generic ChannelConfig) ───
 
+@router.get("/agents/{agent_id}/category-config/{category}")
+async def get_category_config(
+    agent_id: uuid.UUID,
+    category: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get shared configuration for a tool category.
+
+    Returns both global_config (company-level, from Tool.config) and
+    agent_config (agent-level override, from ChannelConfig) separately.
+    Sensitive fields in global_config are masked for display.
+    Company-level values always take precedence at runtime.
+    """
+    from app.core.permissions import check_agent_access
+    from app.models.channel_config import ChannelConfig
+
+    await check_agent_access(db, current_user, agent_id)
+
+    # ── 1. Load company-level (global) config from Tool.config ──────────────
+    # Find a tool in this category that actually has config data.
+    # We cannot just LIMIT 1 because most tools may have empty config.
+    all_cat_tools = await db.execute(
+        select(Tool).where(
+            Tool.category == category,
+            Tool.enabled == True,
+        ).order_by(Tool.name)
+    )
+    raw_global: dict = {}
+    cat_schema: dict | None = None
+    for ct in all_cat_tools.scalars():
+        if ct.config and ct.config != {}:
+            cat_schema = ct.config_schema
+            raw_global = _decrypt_sensitive_fields(ct.config, cat_schema)
+            break
+
+    # Mask sensitive fields for UI display
+    masked_global = dict(raw_global)
+    sensitive_keys = _get_sensitive_keys(cat_schema)
+    for key in sensitive_keys:
+        val = masked_global.get(key)
+        if val and isinstance(val, str):
+            suffix = val[-4:] if len(val) > 4 else val
+            masked_global[key] = f"****{suffix}"
+
+    # ── 2. Load agent-level config from ChannelConfig ───────────────────────
+    result = await db.execute(
+        select(ChannelConfig).where(
+            ChannelConfig.agent_id == agent_id,
+            ChannelConfig.channel_type == category,
+        )
+    )
+    config = result.scalar_one_or_none()
+
+    config_id = None
+    is_configured = bool(raw_global) or config is not None
+    raw_agent: dict = {}
+
+    if config:
+        config_id = str(config.id)
+        full_agent = {
+            "api_key": config.app_secret,
+            **(config.extra_config or {}),
+        }
+        raw_agent = _decrypt_sensitive_fields(full_agent)
+        # Remove None values produced by missing app_secret
+        raw_agent = {k: v for k, v in raw_agent.items() if v is not None}
+
+    # ── 3. Build effective config ───────────────────────────────────────────
+    # Priority: Agent config > Company config > Default
+    # Agent can override company values by setting their own.
+    effective_config = {**raw_global, **raw_agent}
+
+    return {
+        "id": config_id,
+        "agent_id": str(agent_id),
+        "category": category,
+        "is_configured": is_configured,
+        # Legacy field (backward-compat): full effective config for display
+        "config": effective_config,
+        # New fields for richer UI: show global and agent configs separately
+        "global_config": masked_global,
+        "agent_config": raw_agent,
+    }
+
+
+@router.post("/agents/{agent_id}/category-config/{category}")
+async def update_category_config(
+    agent_id: uuid.UUID,
+    category: str,
+    data: CategoryConfigUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update or create shared configuration for a tool category."""
+    from app.core.permissions import check_agent_access, is_agent_creator
+    from app.models.channel_config import ChannelConfig
+
+    agent, _ = await check_agent_access(db, current_user, agent_id)
+    if not is_agent_creator(current_user, agent):
+        raise HTTPException(status_code=403, detail="Only creator can configure category")
+
+    # Encrypt sensitive fields
+    encrypted_config = _encrypt_sensitive_fields(data.config)
+    app_secret = encrypted_config.get("api_key") or encrypted_config.get("api_secret") or encrypted_config.get("app_secret")
+    extra = {k: v for k, v in encrypted_config.items() if k not in ("api_key", "api_secret", "app_secret")}
+
+    result = await db.execute(
+        select(ChannelConfig).where(
+            ChannelConfig.agent_id == agent_id,
+            ChannelConfig.channel_type == category,
+        )
+    )
+    existing = result.scalar_one_or_none()
+    if existing:
+        if app_secret:
+            existing.app_secret = app_secret
+        # Merge extra config (note: extra is already encrypted)
+        existing.extra_config = {**(existing.extra_config or {}), **extra}
+        existing.is_configured = True
+    else:
+        config = ChannelConfig(
+            agent_id=agent_id,
+            channel_type=category,
+            app_id=category,
+            app_secret=app_secret,
+            extra_config=extra,
+            is_configured=True,
+        )
+        db.add(config)
+
+    await db.commit()
+
+    # Special logic for Atlassian: trigger sync
+    if category == "atlassian":
+        from app.api.atlassian import _sync_atlassian_tools_for_agent
+        import asyncio
+        # Need plaintext key for sync
+        plaintext_key = data.config.get("api_key") or data.config.get("api_secret") or data.config.get("app_secret")
+        asyncio.create_task(_sync_atlassian_tools_for_agent(agent_id, plaintext_key))
+
+    return {"ok": True}
+
+
+@router.delete("/agents/{agent_id}/category-config/{category}", status_code=204)
+async def delete_category_config(
+    agent_id: uuid.UUID,
+    category: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove shared configuration for a tool category."""
+    from app.core.permissions import check_agent_access, is_agent_creator
+    from app.models.channel_config import ChannelConfig
+
+    agent, _ = await check_agent_access(db, current_user, agent_id)
+    if not is_agent_creator(current_user, agent):
+        raise HTTPException(status_code=403, detail="Only creator can remove config")
+
+    await db.execute(
+        delete(ChannelConfig).where(
+            ChannelConfig.agent_id == agent_id,
+            ChannelConfig.channel_type == category,
+        )
+    )
+    await db.commit()
+
+
+@router.post("/agents/{agent_id}/category-config/{category}/test")
+async def test_category_config(
+    agent_id: uuid.UUID,
+    category: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Test connectivity for a tool category."""
+    if category == "atlassian":
+        from app.api.atlassian import test_atlassian_channel
+        return await test_atlassian_channel(agent_id, current_user, db)
+    elif category == "agentbay":
+        from app.services.agentbay_client import test_agentbay_channel
+        return await test_agentbay_channel(agent_id, current_user, db)
+
+    return {"ok": True, "message": f"Settings for {category} saved."}
