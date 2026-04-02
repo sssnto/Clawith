@@ -190,27 +190,6 @@ async def check_agent_creation_quota(user_id: uuid.UUID) -> None:
             )
 
 
-async def check_tenant_allows_agent_creation(tenant_id: uuid.UUID) -> None:
-    """Check if agents in the tenant are allowed to create other agents.
-    
-    Raises QuotaExceeded if agent creation by agents is not allowed for the tenant.
-    """
-    from app.models.tenant import Tenant
-
-    async with async_session() as db:
-        result = await db.execute(select(Tenant).where(Tenant.id == tenant_id))
-        tenant = result.scalar_one_or_none()
-        if not tenant:
-            return
-
-        if not tenant.allow_agent_creation_by_agents:
-            raise QuotaExceeded(
-                "Agent creation by agents is disabled for this organization. "
-                "Contact your administrator to enable it.",
-                quota_type="agent_creation_disabled",
-            )
-
-
 # ── Heartbeat floor enforcement ────────────────────────────────────
 
 async def enforce_heartbeat_floor(tenant_id: uuid.UUID, floor: int | None = None, db=None) -> int:

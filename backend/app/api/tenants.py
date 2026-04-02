@@ -35,7 +35,6 @@ class TenantOut(BaseModel):
     im_provider: str
     timezone: str = "UTC"
     is_active: bool
-    allow_agent_creation_by_agents: bool = False
     sso_enabled: bool = False
     sso_domain: str | None = None
     created_at: datetime | None = None
@@ -48,7 +47,6 @@ class TenantUpdate(BaseModel):
     im_provider: str | None = None
     timezone: str | None = None
     is_active: bool | None = None
-    allow_agent_creation_by_agents: bool | None = None
     sso_enabled: bool | None = None
     sso_domain: str | None = None
 

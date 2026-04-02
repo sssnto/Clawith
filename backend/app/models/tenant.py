@@ -49,6 +49,3 @@ class Tenant(Base):
     min_poll_interval_floor: Mapped[int] = mapped_column(Integer, default=5)
     max_webhook_rate_ceiling: Mapped[int] = mapped_column(Integer, default=5)
 
-    # Agent creation permission — controls whether agents can create other agents via Agent Creator skill
-    allow_agent_creation_by_agents: Mapped[bool] = mapped_column(Boolean, default=False)
-

@@ -1306,48 +1306,6 @@ AGENT_TOOLS = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "create_agent",
-            "description": "Create a new digital employee (agent) on the Clawith platform. The new agent will be created within the same organization and can be configured with specific capabilities. Use this when you need to delegate tasks to a specialized agent or create a team of agents. Returns the created agent's ID and details.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Display name for the new agent (2-100 characters)",
-                    },
-                    "role_description": {
-                        "type": "string",
-                        "description": "What the agent does, its responsibilities and capabilities (max 500 characters)",
-                    },
-                    "agent_type": {
-                        "type": "string",
-                        "enum": ["native", "openclaw"],
-                        "description": "Type of agent: 'native' runs in Clawith containers, 'openclaw' connects externally via API",
-                    },
-                    "bio": {
-                        "type": "string",
-                        "description": "Optional short biography for the agent",
-                    },
-                    "personality": {
-                        "type": "string",
-                        "description": "Optional core identity and personality traits, e.g. '细心谨慎, 善于分析数据, 喜欢用图表展示结果'",
-                    },
-                    "boundaries": {
-                        "type": "string",
-                        "description": "Optional behavioral boundaries and constraints, e.g. '不主动发起外部联系, 仅在明确授权时访问敏感信息'",
-                    },
-                    "autonomy_policy": {
-                        "type": "object",
-                        "description": "Optional autonomy levels for capabilities, e.g. {'read_files': 'L1', 'write_workspace_files': 'L2', 'send_feishu_message': 'L2'}",
-                    },
-                },
-                "required": ["name", "role_description"],
-            },
-        },
-    },
     # --- Skill Management ---
     {
         "type": "function",
@@ -1363,31 +1321,6 @@ AGENT_TOOLS = [
                     },
                 },
                 "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_agent_relationship",
-            "description": "Set or update a relationship between this agent and another agent. Use this to define roles like supervisor, teammate, reports_to, collaborates_with, etc. Relationships are bidirectional but defined from the perspective of the calling agent.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "to_agent_name": {
-                        "type": "string",
-                        "description": "Display name of the target agent to establish relationship with",
-                    },
-                    "relationship_type": {
-                        "type": "string",
-                        "description": "Type of relationship: 'reports_to', 'supervises', 'teammates', 'collaborates_with', 'mentors', 'consults'",
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Optional description of how this relationship works",
-                    },
-                },
-                "required": ["to_agent_name", "relationship_type"],
             },
         },
     },
@@ -1463,17 +1396,6 @@ AGENT_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "get_agent_relationships",
-            "description": "List all relationships this agent has with other agents. Returns the relationship types and descriptions.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "agentbay_browser_type",
             "description": "在 AgentBay 浏览器的输入框中输入文本。selector 可以是 CSS 选择器或自然语言描述（如 'phone number input' 或 '手机号输入框'）。",
             "parameters": {
@@ -1526,9 +1448,6 @@ _ALWAYS_INCLUDE_CORE = {
     "send_channel_file",
     "send_file_to_agent",
     "write_file",
-    "create_agent",
-    "set_agent_relationship",
-    "get_agent_relationships",
     "send_channel_message",
 }
 # Channel message tool - available when any channel (Feishu/DingTalk/WeCom) is configured
@@ -1759,7 +1678,6 @@ _TOOL_AUTONOMY_MAP = {
     "send_file_to_agent": "send_feishu_message",
     "web_search": "web_search",
     "execute_code": "execute_code",
-    "create_agent": "create_agent",
 }
 
 
@@ -1812,12 +1730,6 @@ async def _execute_tool_direct(
             return await _send_message_to_agent(agent_id, arguments)
         elif tool_name == "send_file_to_agent":
             return await _send_file_to_agent(agent_id, ws, arguments)
-        elif tool_name == "create_agent":
-            return await _create_agent_tool(agent_id, arguments)
-        elif tool_name == "set_agent_relationship":
-            return await _set_agent_relationship(agent_id, arguments)
-        elif tool_name == "get_agent_relationships":
-            return await _get_agent_relationships(agent_id)
         else:
             return f"Tool {tool_name} does not support post-approval execution"
     except Exception as e:
@@ -2013,12 +1925,6 @@ async def execute_tool(
             result = await _publish_page(agent_id, user_id, ws, arguments)
         elif tool_name == "list_published_pages":
             result = await _list_published_pages(agent_id)
-        elif tool_name == "create_agent":
-            result = await _create_agent_tool(agent_id, arguments)
-        elif tool_name == "set_agent_relationship":
-            result = await _set_agent_relationship(agent_id, arguments)
-        elif tool_name == "get_agent_relationships":
-            result = await _get_agent_relationships(agent_id)
         # ── AgentBay Tools ──
         elif tool_name == "agentbay_browser_navigate":
             result = await _agentbay_browser_navigate(agent_id, ws, arguments)
@@ -7461,235 +7367,6 @@ async def _list_published_pages(agent_id: uuid.UUID) -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"Failed to list pages: {e}"
-
-
-async def _create_agent_tool(calling_agent_id: uuid.UUID, arguments: dict) -> str:
-    """Create a new digital employee (agent) via the Agent Creator skill.
-
-    This is called when an agent uses the create_agent tool.
-    The new agent will be created within the same organization as the calling agent.
-    """
-    from datetime import datetime, timedelta, timezone as tz
-    from app.models.agent import Agent as AgentModel
-    from app.models.tenant import Tenant
-    from app.models.participant import Participant
-    from app.services.quota_guard import check_tenant_allows_agent_creation, QuotaExceeded
-
-    name = arguments.get("name", "").strip()
-    role_description = arguments.get("role_description", "").strip()
-    agent_type = arguments.get("agent_type", "native")
-    bio = arguments.get("bio")
-    autonomy_policy = arguments.get("autonomy_policy")
-    personality = arguments.get("personality", "")
-    boundaries = arguments.get("boundaries", "")
-
-    if not name or len(name) < 2:
-        return "❌ Agent name must be at least 2 characters"
-    if len(name) > 100:
-        return "❌ Agent name must be at most 100 characters"
-    if not role_description:
-        return "❌ Role description is required"
-    if len(role_description) > 500:
-        return "❌ Role description must be at most 500 characters"
-
-    if agent_type not in ("native", "openclaw"):
-        return f"❌ Invalid agent_type '{agent_type}'. Must be 'native' or 'openclaw'"
-
-    try:
-        async with async_session() as db:
-            result = await db.execute(select(AgentModel).where(AgentModel.id == calling_agent_id))
-            calling_agent = result.scalar_one_or_none()
-            if not calling_agent:
-                return "❌ Calling agent not found"
-
-            creator_id = calling_agent.creator_id
-            target_tenant_id = calling_agent.tenant_id
-
-            try:
-                await check_tenant_allows_agent_creation(target_tenant_id)
-            except QuotaExceeded as e:
-                return f"❌ {e.message}"
-
-            ttl_hours = 48
-            max_llm_calls = 100
-            default_max_triggers = 20
-            default_min_poll = 5
-            default_webhook_rate = 5
-            default_heartbeat_interval = 240
-
-            if target_tenant_id:
-                tenant_result = await db.execute(select(Tenant).where(Tenant.id == target_tenant_id))
-                tenant = tenant_result.scalar_one_or_none()
-                if tenant:
-                    max_llm_calls = tenant.default_max_llm_calls_per_day or 100
-                    default_max_triggers = tenant.default_max_triggers or 20
-                    default_min_poll = tenant.min_poll_interval_floor or 5
-                    default_webhook_rate = tenant.max_webhook_rate_ceiling or 5
-                    if tenant.min_heartbeat_interval_minutes and tenant.min_heartbeat_interval_minutes > default_heartbeat_interval:
-                        default_heartbeat_interval = tenant.min_heartbeat_interval_minutes
-
-            expires_at = datetime.now(tz.utc) + timedelta(hours=ttl_hours)
-
-            new_agent = AgentModel(
-                name=name,
-                role_description=role_description,
-                bio=bio,
-                creator_id=creator_id,
-                tenant_id=target_tenant_id,
-                agent_type=agent_type,
-                autonomy_policy=autonomy_policy or {},
-                primary_model_id=calling_agent.primary_model_id,
-                status="creating",
-                expires_at=expires_at,
-                max_tokens_per_day=calling_agent.max_tokens_per_day,
-                max_tokens_per_month=calling_agent.max_tokens_per_month,
-            )
-
-            db.add(new_agent)
-            await db.flush()
-
-            db.add(Participant(
-                type="agent", ref_id=new_agent.id,
-                display_name=new_agent.name, avatar_url=new_agent.avatar_url,
-            ))
-            await db.flush()
-
-            if agent_type == "openclaw":
-                import secrets, hashlib
-                raw_key = f"oc-{secrets.token_urlsafe(32)}"
-                new_agent.api_key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
-                new_agent.status = "idle"
-                await db.commit()
-                await db.refresh(new_agent)
-
-                result_lines = [
-                    f"✅ Agent created successfully!",
-                    f"",
-                    f"- **Name**: {new_agent.name}",
-                    f"- **ID**: {new_agent.id}",
-                    f"- **Type**: {new_agent.agent_type}",
-                    f"- **Status**: {new_agent.status}",
-                    f"- **Expires**: {new_agent.expires_at.strftime('%Y-%m-%d %H:%M UTC') if new_agent.expires_at else 'N/A'}",
-                    f"- **API Key**: `{raw_key}`",
-                    f"  Save this key now — it will not be shown again.",
-                ]
-                return "\n".join(result_lines)
-
-            from app.services.agent_manager import agent_manager
-            await agent_manager.initialize_agent_files(
-                db, new_agent,
-                personality=personality,
-                boundaries=boundaries,
-            )
-
-            await agent_manager.start_container(db, new_agent)
-            await db.commit()
-            await db.refresh(new_agent)
-
-            result_lines = [
-                f"✅ Agent created successfully!",
-                f"",
-                f"- **Name**: {new_agent.name}",
-                f"- **ID**: {new_agent.id}",
-                f"- **Type**: {new_agent.agent_type}",
-                f"- **Status**: {new_agent.status}",
-                f"- **Expires**: {new_agent.expires_at.strftime('%Y-%m-%d %H:%M UTC') if new_agent.expires_at else 'N/A'}",
-            ]
-
-            return "\n".join(result_lines)
-
-    except Exception as e:
-        logger.error(f"[create_agent] Failed to create agent: {e}")
-        return f"❌ Failed to create agent: {e}"
-
-
-async def _set_agent_relationship(agent_id: uuid.UUID, arguments: dict) -> str:
-    """Set or update a relationship between this agent and another agent."""
-    from app.models.agent import Agent as AgentModel
-    from app.models.org import AgentAgentRelationship
-
-    to_agent_name = arguments.get("to_agent_name", "").strip()
-    relationship_type = arguments.get("relationship_type", "").strip()
-    description = arguments.get("description", "").strip()
-
-    if not to_agent_name:
-        return "❌ Target agent name is required"
-    if not relationship_type:
-        return "❌ Relationship type is required"
-
-    valid_types = {"reports_to", "supervises", "teammates", "collaborates_with", "mentors", "consults"}
-    if relationship_type not in valid_types:
-        return f"❌ Invalid relationship_type. Must be one of: {', '.join(valid_types)}"
-
-    try:
-        async with async_session() as db:
-            to_result = await db.execute(
-                select(AgentModel).where(AgentModel.name == to_agent_name)
-            )
-            to_agent = to_result.scalar_one_or_none()
-            if not to_agent:
-                return f"❌ Agent '{to_agent_name}' not found"
-
-            if to_agent.id == agent_id:
-                return "❌ Cannot set a relationship with yourself"
-
-            existing = await db.execute(
-                select(AgentAgentRelationship).where(
-                    AgentAgentRelationship.agent_id == agent_id,
-                    AgentAgentRelationship.target_agent_id == to_agent.id,
-                )
-            )
-            relation = existing.scalar_one_or_none()
-
-            if relation:
-                relation.relation = relationship_type
-                relation.description = description or ""
-            else:
-                relation = AgentAgentRelationship(
-                    agent_id=agent_id,
-                    target_agent_id=to_agent.id,
-                    relation=relationship_type,
-                    description=description or "",
-                )
-                db.add(relation)
-
-            await db.commit()
-            return f"✅ Relationship set: You → [{relationship_type}] → {to_agent_name}"
-
-    except Exception as e:
-        logger.error(f"[set_agent_relationship] Failed: {e}")
-        return f"❌ Failed to set relationship: {e}"
-
-
-async def _get_agent_relationships(agent_id: uuid.UUID) -> str:
-    """List all relationships this agent has with other agents."""
-    from app.models.agent import Agent as AgentModel
-    from app.models.org import AgentAgentRelationship
-
-    try:
-        async with async_session() as db:
-            result = await db.execute(
-                select(AgentAgentRelationship, AgentModel.name)
-                .join(AgentModel, AgentAgentRelationship.target_agent_id == AgentModel.id)
-                .where(AgentAgentRelationship.agent_id == agent_id)
-            )
-            rows = result.all()
-
-        if not rows:
-            return "No relationships defined yet."
-
-        lines = ["## Your Relationships\n"]
-        for relation, to_name in rows:
-            lines.append(f"- **{to_name}**")
-            lines.append(f"  Type: `{relation.relation}`")
-            if relation.description:
-                lines.append(f"  Description: {relation.description}")
-            lines.append("")
-        return "\n".join(lines)
-
-    except Exception as e:
-        logger.error(f"[get_agent_relationships] Failed: {e}")
-        return f"❌ Failed to get relationships: {e}"
 
 
 # ─── AgentBay Tool Handlers ─────────────────────────────────────

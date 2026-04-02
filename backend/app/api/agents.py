@@ -6,14 +6,13 @@ import secrets
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Union
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import check_agent_access, is_agent_creator
-from app.core.security import get_current_user, get_current_user_or_agent, require_role
+from app.core.security import get_current_user
 from app.database import get_db
 from app.models.agent import Agent, AgentPermission
 from app.models.user import User
@@ -195,43 +194,25 @@ async def list_agents(
 @router.post("/", status_code=status.HTTP_201_CREATED)
 async def create_agent(
     data: AgentCreate,
-    actor: Union[User, Agent] = Depends(get_current_user_or_agent),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new digital employee.
+    """Create a new digital employee (any authenticated user)."""
+    # Check agent creation quota
+    from app.services.quota_guard import check_agent_creation_quota, QuotaExceeded
+    try:
+        await check_agent_creation_quota(current_user.id)
+    except QuotaExceeded as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=e.message)
 
-    Accepts JWT authentication (human user) or X-Api-Key (OpenClaw agent).
-    When an agent creates an employee, the new employee's creator_id is set to
-    the creating agent's human owner, and the tenant is inherited from the creator.
-    """
-    from app.services.quota_guard import check_agent_creation_quota, check_tenant_allows_agent_creation, QuotaExceeded
-
-    is_agent_actor = isinstance(actor, Agent)
-
-    if is_agent_actor:
-        creator_id = actor.creator_id
-        target_tenant_id = actor.tenant_id
-        try:
-            await check_tenant_allows_agent_creation(target_tenant_id)
-        except QuotaExceeded as e:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=e.message)
-    else:
-        creator_id = actor.id
-        target_tenant_id = actor.tenant_id
-        if actor.role in ("platform_admin", "org_admin") and data.tenant_id:
-            target_tenant_id = data.tenant_id
-        try:
-            await check_agent_creation_quota(actor.id)
-        except QuotaExceeded as e:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=e.message)
-
+    # Calculate expiry time
     from datetime import datetime, timedelta, timezone as tz
-    ttl_hours = 48
-    if is_agent_actor:
-        ttl_hours = 48
-    else:
-        ttl_hours = actor.quota_agent_ttl_hours or 48
-    expires_at = datetime.now(tz.utc) + timedelta(hours=ttl_hours)
+    expires_at = datetime.now(tz.utc) + timedelta(hours=current_user.quota_agent_ttl_hours or 48)
+
+    # Determine target tenant: normally user's tenant; admins can override via payload
+    target_tenant_id = current_user.tenant_id
+    if current_user.role in ("platform_admin", "org_admin") and data.tenant_id:
+        target_tenant_id = data.tenant_id
 
     # Get default limits from target tenant
     max_llm_calls = 100
@@ -257,7 +238,7 @@ async def create_agent(
         role_description=data.role_description,
         bio=data.bio,
         avatar_url=data.avatar_url,
-        creator_id=creator_id,
+        creator_id=current_user.id,
         tenant_id=target_tenant_id,
         agent_type=data.agent_type or "native",
         primary_model_id=data.primary_model_id,
@@ -299,7 +280,7 @@ async def create_agent(
                 db.add(AgentPermission(agent_id=agent.id, scope_type="user", scope_id=scope_id, access_level=access_level))
         else:
             # "仅自己" — insert creator as the only permitted user
-            db.add(AgentPermission(agent_id=agent.id, scope_type="user", scope_id=creator_id, access_level="manage"))
+            db.add(AgentPermission(agent_id=agent.id, scope_type="user", scope_id=current_user.id, access_level="manage"))
 
     await db.flush()
 
@@ -376,9 +357,18 @@ async def get_agent(
     out = AgentOut.model_validate(agent).model_dump()
     out["access_level"] = access_level
 
-    # Resolve creator username (one extra query, only on detail page)
+    # Resolve creator username (one extra query, only on detail page).
+    # IMPORTANT: User.username is an association_proxy to User.identity.username.
+    # We must eagerly load the identity relationship (selectinload) to avoid
+    # async lazy-loading errors (SQLAlchemy raises MissingGreenlet in async context).
     if agent.creator_id:
-        creator_result = await db.execute(select(User).where(User.id == agent.creator_id))
+        from sqlalchemy.orm import selectinload
+        from app.models.user import Identity  # noqa: F401
+        creator_result = await db.execute(
+            select(User)
+            .where(User.id == agent.creator_id)
+            .options(selectinload(User.identity))
+        )
         creator = creator_result.scalar_one_or_none()
         out["creator_username"] = creator.username if creator else None
 

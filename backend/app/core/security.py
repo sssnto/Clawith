@@ -1,16 +1,14 @@
 """Security utilities: JWT, password hashing, and authentication dependencies."""
 
 import base64
-import hashlib
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Union
 
 import bcrypt
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from sqlalchemy import select
@@ -22,35 +20,77 @@ from app.database import get_db
 
 settings = get_settings()
 
+# Bearer token scheme
 security = HTTPBearer()
 
 
 def encrypt_data(plaintext: str, key: str) -> str:
-    """Encrypt a string using AES-256-CBC with the given key."""
+    """Encrypt a string using AES-256-CBC with the given key.
+
+    Args:
+        plaintext: The string to encrypt
+        key: The encryption key (will be hashed to 32 bytes)
+
+    Returns:
+        Base64-encoded encrypted string with IV prefix
+    """
     if not plaintext:
         return ""
+
+    # Derive 32-byte key from the secret key
     key_bytes = key.encode("utf-8")
+    # Use SHA-256 hash to get exactly 32 bytes for AES-256
+    import hashlib
+
     aes_key = hashlib.sha256(key_bytes).digest()
+
+    # Generate random 16-byte IV
     iv = os.urandom(16)
+
+    # Create cipher and encrypt
     cipher = AES.new(aes_key, AES.MODE_CBC, iv)
     padded_data = pad(plaintext.encode("utf-8"), AES.block_size)
     encrypted = cipher.encrypt(padded_data)
+
+    # Prepend IV to ciphertext and encode as base64
     result = base64.b64encode(iv + encrypted).decode("utf-8")
     return result
 
 
 def decrypt_data(ciphertext: str, key: str) -> str:
-    """Decrypt a string encrypted with encrypt_data."""
+    """Decrypt a string encrypted with encrypt_data.
+
+    Args:
+        ciphertext: Base64-encoded encrypted string with IV prefix
+        key: The encryption key (must match the key used for encryption)
+
+    Returns:
+        Decrypted plaintext string
+
+    Raises:
+        ValueError: If decryption fails (wrong key, corrupted data, etc.)
+    """
     if not ciphertext:
         return ""
+
     try:
+        # Decode base64
         raw = base64.b64decode(ciphertext)
+
+        # Extract IV (first 16 bytes) and ciphertext
         iv = raw[:16]
         encrypted = raw[16:]
+
+        # Derive key
+        import hashlib
+
         aes_key = hashlib.sha256(key.encode("utf-8")).digest()
+
+        # Decrypt
         cipher = AES.new(aes_key, AES.MODE_CBC, iv)
         padded_data = cipher.decrypt(encrypted)
         plaintext = unpad(padded_data, AES.block_size).decode("utf-8")
+
         return plaintext
     except Exception as e:
         raise ValueError(f"Decryption failed: {e}") from e
@@ -112,52 +152,6 @@ async def get_current_user(
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
     return user
-
-
-async def get_current_user_or_agent(
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-) -> Union["User", "Agent"]:
-    """Dependency that accepts either JWT (human user) or X-Api-Key (OpenClaw agent).
-
-    Returns a User for JWT auth or an Agent for API key auth.
-    When an OpenClaw agent makes the request, its Agent object is returned.
-    """
-    from app.models.user import User
-    from app.models.agent import Agent
-
-    auth_header = request.headers.get("Authorization", "")
-    api_key = request.headers.get("X-Api-Key")
-
-    if auth_header.startswith("Bearer "):
-        token = auth_header[7:]
-        try:
-            payload = decode_access_token(token)
-            user_id = payload.get("sub")
-            if user_id:
-                result = await db.execute(select(User).where(User.id == uuid.UUID(user_id)))
-                user = result.scalar_one_or_none()
-                if user and user.is_active:
-                    return user
-        except HTTPException:
-            pass
-
-    if api_key:
-        key_hash = hashlib.sha256(api_key.encode()).hexdigest()
-        result = await db.execute(
-            select(Agent).where(
-                Agent.api_key_hash.in_([api_key, key_hash]),
-                Agent.agent_type == "openclaw",
-            )
-        )
-        agent = result.scalar_one_or_none()
-        if agent:
-            return agent
-
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Invalid credentials — provide JWT Bearer token or X-Api-Key",
-    )
 
 
 async def get_authenticated_user(
