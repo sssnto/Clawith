@@ -21,8 +21,26 @@ from app.services.feishu_service import feishu_service
 
 router = APIRouter(tags=["feishu"])
 
-_LLM_TIMEOUT_SECONDS = 180.0
-_TOOL_STATUS_KEEP_LINES = 8
+# Default LLM timeout for Feishu channel (fallback when model has no request_timeout set).
+# The per-model request_timeout field takes precedence — see _get_llm_timeout().
+_LLM_TIMEOUT_SECONDS_DEFAULT = 180.0
+
+# Number of tool status lines to keep visible in the Feishu card.
+# Shows the last N non-running lines plus any active "running" entry.
+_TOOL_STATUS_KEEP_LINES = 20
+
+
+def _get_llm_timeout(model) -> float:
+    """Get effective LLM timeout for the Feishu channel.
+
+    Prefer the model-level request_timeout so each model can have its own
+    budget (local vLLM may need 300 s, cloud APIs often need only 60 s).
+    Falls back to _LLM_TIMEOUT_SECONDS_DEFAULT when the field is absent or zero.
+    """
+    timeout = getattr(model, "request_timeout", None)
+    if timeout and float(timeout) > 0:
+        return float(timeout)
+    return _LLM_TIMEOUT_SECONDS_DEFAULT
 
 
 class _SerialPatchQueue:
@@ -686,31 +704,59 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
             _patch_queue = _SerialPatchQueue()
             _heartbeat_task: asyncio.Task | None = None
             _llm_done = False
+            _last_flushed_hash: int = 0  # Content hash to skip no-op heartbeat patches
 
-            def _build_card(answer_text: str, thinking_text: str = "", streaming: bool = False) -> dict:
-                """Build interactive card. Thinking shown in collapsible grey section."""
+            def _build_card(
+                answer_text: str,
+                thinking_text: str = "",
+                streaming: bool = False,
+                tool_status_lines: list[str] | None = None,
+                agent_name: str | None = None,
+            ) -> dict:
+                """Build a Feishu interactive card for streaming replies.
+
+                Args:
+                    answer_text: Main reply text (may be partial during streaming).
+                    thinking_text: Reasoning/thinking content shown in a collapsed section.
+                    streaming: If True, appends a cursor glyph to indicate in-progress output.
+                    tool_status_lines: Override the default _tool_status_lines list
+                        (used by image streaming which has its own separate list).
+                    agent_name: Override the default _agent_name (for image streaming context).
+                """
+                _name = agent_name if agent_name is not None else _agent_name
+                _status_lines = tool_status_lines if tool_status_lines is not None else _tool_status_lines
+
                 elements = []
-                if _tool_status_lines:
-                    elements.append({
-                        "tag": "markdown",
-                        "content": "\n".join(_tool_status_lines[-_TOOL_STATUS_KEEP_LINES:]),
-                    })
-                    elements.append({"tag": "hr"})
+
+                # Tool status section: show last N lines, keeping the most recent
+                # "running" entry on top of the trimmed "done" history.
+                if _status_lines:
+                    done_lines = [l for l in _status_lines if "running" not in l.lower()]
+                    running_lines = [l for l in _status_lines if "running" in l.lower()]
+                    visible = done_lines[-_TOOL_STATUS_KEEP_LINES:] + running_lines[-1:]
+                    if visible:
+                        elements.append({
+                            "tag": "markdown",
+                            "content": "\n".join(visible),
+                        })
+                        elements.append({"tag": "hr"})
+
+                # Thinking section: collapsed grey block
                 if thinking_text:
-                    # Show thinking in a collapsible note block
                     think_preview = thinking_text[:200].replace("\n", " ")
                     elements.append({
                         "tag": "markdown",
-                        "content": f"<font color='grey'>💭 **思考过程**\n{think_preview}{'...' if len(thinking_text) > 200 else ''}</font>",
+                        "content": f"<font color='grey'>💭 **Thinking**\n{think_preview}{'...' if len(thinking_text) > 200 else ''}</font>",
                     })
                     elements.append({"tag": "hr"})
+
                 body = answer_text + ("▌" if streaming and answer_text else ("..." if streaming else ""))
                 elements.append({"tag": "markdown", "content": body or "..."})
                 return {
                     "config": {"update_multi": True},
                     "header": {
                         "template": "blue",
-                        "title": {"content": _agent_name, "tag": "plain_text"},
+                        "title": {"content": _name, "tag": "plain_text"},
                     },
                     "elements": elements,
                 }
@@ -735,7 +781,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                 _patch_queue.enqueue(_job)
 
             async def _flush_stream(reason: str, force: bool = False):
-                nonlocal _last_flush_time
+                nonlocal _last_flush_time, _last_flushed_hash
                 if not msg_id_for_patch:
                     return
                 now = time.time()
@@ -746,6 +792,12 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                     "".join(_thinking_buffer),
                     streaming=True,
                 )
+                # Skip patch when content has not changed since the last flush
+                # (common during heartbeat ticks when LLM is waiting for tool results).
+                current_hash = hash("".join(_stream_buffer) + "".join(_thinking_buffer) + str(_tool_status_lines))
+                if reason == "heartbeat" and current_hash == _last_flushed_hash:
+                    return
+                _last_flushed_hash = current_hash
                 await _queue_patch_card(card, stage=f"stream_{reason}")
                 _last_flush_time = now
 
@@ -762,14 +814,15 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                 await _flush_stream("thinking")
 
             async def _ws_on_tool_call(evt: dict):
+                """Receive tool call status events and update the card's progress section."""
                 tool_name = evt.get("name") or "unknown_tool"
                 status = (evt.get("status") or "").lower()
                 if status == "running":
-                    line = f"⏳ 正在调用工具: `{tool_name}`"
+                    line = f"⏳ Tool running: `{tool_name}`"
                 elif status == "done":
-                    line = f"✅ 工具完成: `{tool_name}`"
+                    line = f"✅ Tool done: `{tool_name}`"
                 else:
-                    line = f"ℹ️ 工具状态更新: `{tool_name}` ({status or 'unknown'})"
+                    line = f"ℹ️ Tool update: `{tool_name}` ({status or 'unknown'})"
                 _tool_status_lines.append(line)
                 await _flush_stream("tool")
 
@@ -1111,8 +1164,10 @@ async def _handle_feishu_file(db, agent_id, config, message, sender_open_id, cha
         _img_patch_queue = _SerialPatchQueue()
         _img_heartbeat_task: asyncio.Task | None = None
         _img_llm_done = False
+        _img_last_flushed_hash: int = 0  # Content hash to skip no-op heartbeat patches
 
         async def _queue_image_patch(_card: dict, _stage: str):
+            """Enqueue a serialized PATCH request for the image streaming card."""
             if not _patch_msg_id:
                 return
             _payload = _json_card_img.dumps(_card)
@@ -1132,15 +1187,28 @@ async def _handle_feishu_file(db, agent_id, config, message, sender_open_id, cha
             _img_patch_queue.enqueue(_job)
 
         async def _flush_image_stream(reason: str, force: bool = False):
-            nonlocal _img_last_flush
+            """Build and enqueue an image streaming card update.
+
+            Reuses _build_card so the image path supports the same thinking
+            and tool-status sections as the text streaming path.
+            Skips the patch on heartbeat ticks when content has not changed.
+            """
+            nonlocal _img_last_flush, _img_last_flushed_hash
             now = time.time()
             if not force and now - _img_last_flush < _img_flush_interval:
                 return
-            _card = {
-                "config": {"update_multi": True},
-                "header": {"template": "blue", "title": {"content": _agent_name, "tag": "plain_text"}},
-                "elements": [{"tag": "markdown", "content": "".join(_img_stream_buf) + "▌"}]
-            }
+            # Reuse the shared card builder (no tool_status for image path yet,
+            # but the builder is ready to accept them in the future).
+            _card = _build_card(
+                "".join(_img_stream_buf),
+                streaming=True,
+                agent_name=_agent_name,
+            )
+            # Skip no-op heartbeat patches when content hasn't changed.
+            current_hash = hash("".join(_img_stream_buf))
+            if reason == "heartbeat" and current_hash == _img_last_flushed_hash:
+                return
+            _img_last_flushed_hash = current_hash
             await _queue_image_patch(_card, _stage=f"image_stream_{reason}")
             _img_last_flush = now
 
@@ -1182,11 +1250,12 @@ async def _handle_feishu_file(db, agent_id, config, message, sender_open_id, cha
                 await _img_patch_queue.drain()
             except Exception as _e_drain:
                 logger.warning(f"[Feishu] Image patch queue drain failed: {_e_drain}")
-            _final_card = {
-                "config": {"update_multi": True},
-                "header": {"template": "blue", "title": {"content": _agent_name, "tag": "plain_text"}},
-                "elements": [{"tag": "markdown", "content": reply_text or "..."}]
-            }
+            # Build final card via shared builder (consistent with text streaming path).
+            _final_card = _build_card(
+                reply_text or "...",
+                streaming=False,
+                agent_name=_agent_name,
+            )
             await feishu_service.patch_message(
                 config.app_id, config.app_secret, _patch_msg_id, _json_card_img.dumps(_final_card), stage="image_stream_final"
             )
@@ -1322,6 +1391,9 @@ async def _call_agent_llm(
     # Use actual user_id so the system prompt knows who it's chatting with
     effective_user_id = user_id or agent_id
 
+    # Determine effective timeout: prefer model-level setting, else use module default.
+    _timeout = _get_llm_timeout(model)
+
     try:
         reply = await asyncio.wait_for(
             call_llm(
@@ -1336,16 +1408,18 @@ async def _call_agent_llm(
                 on_thinking=on_thinking,
                 on_tool_call=on_tool_call,
             ),
-            timeout=_LLM_TIMEOUT_SECONDS,
+            timeout=_timeout,
         )
         return reply
     except asyncio.TimeoutError:
         logger.error(
-            f"[LLM] Call timed out after {_LLM_TIMEOUT_SECONDS}s "
+            f"[LLM] Call timed out after {_timeout}s "
             f"(agent_id={agent_id}, model={getattr(model, 'model', 'unknown')})"
         )
         if fallback_model:
-            logger.info(f"[LLM] Retrying timed-out request with fallback model: {fallback_model.model}")
+            # Use the fallback model's own timeout budget.
+            _fb_timeout = _get_llm_timeout(fallback_model)
+            logger.info(f"[LLM] Retrying timed-out request with fallback model: {fallback_model.model} (timeout={_fb_timeout}s)")
             try:
                 reply = await asyncio.wait_for(
                     call_llm(
@@ -1360,20 +1434,20 @@ async def _call_agent_llm(
                         on_thinking=on_thinking,
                         on_tool_call=on_tool_call,
                     ),
-                    timeout=_LLM_TIMEOUT_SECONDS,
+                    timeout=_fb_timeout,
                 )
                 return reply
             except asyncio.TimeoutError:
                 logger.error(
-                    f"[LLM] Fallback call also timed out after {_LLM_TIMEOUT_SECONDS}s "
+                    f"[LLM] Fallback call also timed out after {_fb_timeout}s "
                     f"(agent_id={agent_id}, model={getattr(fallback_model, 'model', 'unknown')})"
                 )
-                return f"⚠️ 模型响应超时（>{int(_LLM_TIMEOUT_SECONDS)}秒）。请稍后重试，或减少一次请求内容。"
+                return f"⚠️ Model response timed out (>{int(_fb_timeout)}s). Please retry or shorten your request."
             except Exception as e2:
                 import traceback
                 traceback.print_exc()
-                return f"⚠️ 调用模型出错: Primary Timeout | Fallback: {str(e2)[:80]}"
-        return f"⚠️ 模型响应超时（>{int(_LLM_TIMEOUT_SECONDS)}秒）。请稍后重试，或减少一次请求内容。"
+                return f"⚠️ Model error: Primary Timeout | Fallback: {str(e2)[:80]}"
+        return f"⚠️ Model response timed out (>{int(_timeout)}s). Please retry or shorten your request."
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1383,6 +1457,7 @@ async def _call_agent_llm(
         if fallback_model:
             logger.info(f"[LLM] Retrying with fallback model: {fallback_model.model}")
             try:
+                _fb_timeout = _get_llm_timeout(fallback_model)
                 reply = await asyncio.wait_for(
                     call_llm(
                         fallback_model,
@@ -1396,16 +1471,16 @@ async def _call_agent_llm(
                         on_thinking=on_thinking,
                         on_tool_call=on_tool_call,
                     ),
-                    timeout=_LLM_TIMEOUT_SECONDS,
+                    timeout=_fb_timeout,
                 )
                 return reply
             except asyncio.TimeoutError:
                 logger.error(
-                    f"[LLM] Fallback call timed out after {_LLM_TIMEOUT_SECONDS}s "
+                    f"[LLM] Fallback call timed out after {_fb_timeout}s "
                     f"(agent_id={agent_id}, model={getattr(fallback_model, 'model', 'unknown')})"
                 )
-                return f"⚠️ 调用模型超时: Primary: {str(e)[:80]} | Fallback Timeout"
+                return f"⚠️ Model error: Primary: {str(e)[:80]} | Fallback Timeout"
             except Exception as e2:
                 traceback.print_exc()
-                return f"⚠️ 调用模型出错: Primary: {str(e)[:80]} | Fallback: {str(e2)[:80]}"
+                return f"⚠️ Model error: Primary: {str(e)[:80]} | Fallback: {str(e2)[:80]}"
         return f"⚠️ 调用模型出错: {error_msg[:150]}"
