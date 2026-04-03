@@ -1151,10 +1151,13 @@ async def list_org_departments(
     db: AsyncSession = Depends(get_db),
 ):
     """List all departments, optionally filtered by tenant or provider."""
-    # Authorization: non-platform admins can only see their own tenant's data
+    # Authorization: non-platform admins can only see their own tenant's data.
+    # Auto-scope to current user's tenant when tenant_id is not explicitly provided.
     if tenant_id and current_user.role != "platform_admin":
         if str(current_user.tenant_id) != tenant_id:
             raise HTTPException(status_code=403, detail="Cannot access other tenant's data")
+    if not tenant_id and current_user.role != "platform_admin":
+        tenant_id = str(current_user.tenant_id) if current_user.tenant_id else None
 
     query = select(OrgDepartment, IdentityProvider.name.label("provider_name"), IdentityProvider.provider_type).outerjoin(
         IdentityProvider, OrgDepartment.provider_id == IdentityProvider.id
@@ -1206,10 +1209,15 @@ async def list_org_members(
     db: AsyncSession = Depends(get_db),
 ):
     """List org members, optionally filtered by department, search, tenant, or provider."""
-    # Authorization: non-platform admins can only see their own tenant's data
+    # Authorization: non-platform admins can only see their own tenant's data.
+    # If tenant_id is not explicitly provided, automatically scope to the current
+    # user's tenant so that cross-tenant member data is never leaked.
     if tenant_id and current_user.role != "platform_admin":
         if str(current_user.tenant_id) != tenant_id:
             raise HTTPException(status_code=403, detail="Cannot access other tenant's data")
+    if not tenant_id and current_user.role != "platform_admin":
+        # Auto-scope: non-platform admins always see only their own tenant's members.
+        tenant_id = str(current_user.tenant_id) if current_user.tenant_id else None
 
     query = select(OrgMember, IdentityProvider.name.label("provider_name"), IdentityProvider.provider_type).outerjoin(
         IdentityProvider, OrgMember.provider_id == IdentityProvider.id
