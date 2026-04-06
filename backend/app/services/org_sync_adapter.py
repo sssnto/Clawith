@@ -19,7 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.identity import IdentityProvider
 from app.models.org import OrgDepartment, OrgMember
 from app.models.user import User, Identity
-from pypinyin import pinyin, Style
+from pypinyin import pinyin, lazy_pinyin, Style
+from anyascii import anyascii as _anyascii
 
 from app.core.security import hash_password
 
@@ -461,8 +462,10 @@ class BaseOrgSyncAdapter(ABC):
         # Update/Create OrgMember
         if existing_member:
             existing_member.name = user.name
-            # Generate transliteration
-            existing_member.name_translit_full = "".join([i[0] for i in pinyin(user.name, style=Style.NORMAL)])
+            # Generate transliteration using layered strategy:
+            # 1. pypinyin converts CJK characters to pinyin
+            # 2. anyascii handles remaining non-ASCII scripts (Korean, Japanese kana, Arabic, etc.)
+            existing_member.name_translit_full = _anyascii("".join(lazy_pinyin(user.name, errors="default")))
             existing_member.name_translit_initial = "".join([i[0] for i in pinyin(user.name, style=Style.FIRST_LETTER)])
             
             if email is not None:
@@ -486,7 +489,10 @@ class BaseOrgSyncAdapter(ABC):
                 existing_member.user_id = user_id
             stats["profile_synced"] = True
         else:
-            translit_full = "".join([i[0] for i in pinyin(user.name, style=Style.NORMAL)])
+            # Generate transliteration using layered strategy:
+            # 1. pypinyin converts CJK characters to pinyin
+            # 2. anyascii handles remaining non-ASCII scripts (Korean, Japanese kana, Arabic, etc.)
+            translit_full = _anyascii("".join(lazy_pinyin(user.name, errors="default")))
             translit_initial = "".join([i[0] for i in pinyin(user.name, style=Style.FIRST_LETTER)])
             
             new_member = OrgMember(
@@ -656,10 +662,19 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
 
     async def fetch_users(self, department_external_id: str) -> list[ExternalUser]:
         """Fetch users in a department.
-        
-        Uses user_id_type=user_id which requires the contact:user.employee_id:readonly
-        permission. If the Feishu API returns an error due to missing permission, raises
-        a clear error instructing the user to add the required scope.
+
+        IMPORTANT: Uses user_id_type=user_id (employee_id), which requires the
+        'contact:user.employee_id:readonly' permission in the Feishu app.
+
+        WHY user_id (not open_id or union_id):
+        - open_id is app-specific: the same user has a different open_id in each Feishu app.
+          Using open_id would break matching between org-sync users and Feishu bot channel users,
+          since they use different apps.
+        - union_id is ISV-scoped (same across apps from the same ISV), but not universal.
+        - user_id (employee_id) is the only enterprise-wide stable identifier that works
+          consistently across org sync, SSO, and bot channel user resolution.
+
+        This permission requires app re-publishing in Feishu console (not instant like DingTalk).
         """
         token = await self.get_access_token()
         users: list[ExternalUser] = []
@@ -670,7 +685,9 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
                 params = {
                     "department_id": department_external_id,
                     "department_id_type": "open_department_id",
-                    "user_id_type": "user_id",  # Requires contact:user.employee_id:readonly
+                    # user_id (employee_id) is the enterprise-wide stable identifier.
+                    # Requires 'contact:user.employee_id:readonly' permission + app re-publish.
+                    "user_id_type": "user_id",
                     "page_size": "50",
                 }
                 if page_token:
@@ -690,12 +707,13 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
                         f"Feishu fetch users error for dept {department_external_id}: "
                         f"code={error_code}, msg={error_msg}"
                     )
-                    # Raise a user-friendly error for permission issues
                     raise RuntimeError(
                         f"Feishu API error (code {error_code}): {error_msg}. "
-                        f"Please ensure the Feishu app has the 'contact:user.employee_id:readonly' "
-                        f"permission enabled. Go to Feishu Open Platform -> App -> Permissions -> "
-                        f"search 'employee_id' -> enable and publish a new version."
+                        f"Access denied. One of the following scopes is required: "
+                        f"[contact:user.employee_id:readonly]. "
+                        f"Please enable this permission in Feishu Open Platform -> App -> "
+                        f"Permissions -> search 'employee_id' -> enable and publish a new version. "
+                        f"Note: unlike DingTalk, Feishu permissions require app re-publishing to take effect."
                     )
 
                 res_data = data.get("data", {})
@@ -705,8 +723,11 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
                     raw_dept_ids = item.get("department_ids", [])
                     department_ids = [str(did) for did in raw_dept_ids] if raw_dept_ids else [department_external_id]
                     
+                    # When user_id_type=open_id, Feishu returns the open_id value in the
+                    # "user_id" field of the response. So external_id == open_id == open_id field.
+                    # The open_id field is also present for consistency.
                     external_id = item.get("user_id", "") or item.get("open_id", "")
-                    
+
                     # For Feishu, a user is considered inactive if they are explicitly frozen or resigned.
                     # Merely not being activated (is_activated=False) shouldn't hide them from the org chart.
                     feishu_status = item.get("status", {})
@@ -943,19 +964,12 @@ class WeComOrgSyncAdapter(BaseOrgSyncAdapter):
 
     def __init__(self, provider: IdentityProvider | None = None, config: dict | None = None, tenant_id: uuid.UUID | None = None):
         super().__init__(provider, config, tenant_id)
-        # Handle various config key naming conventions
+        # corp_id: the enterprise's WeCom corp ID
+        # secret: the 通讯录同步 (contact-sync) secret — used for department/simplelist and user/list_id
         self.corp_id = self.config.get("corp_id") or self.config.get("app_id") or self.config.get("corpid")
-        self.secret = self.config.get("secret") or self.config.get("app_secret") or self.config.get("corpsecret") or self.config.get("bot_secret")
-        self.bot_id = self.config.get("bot_id")
-        self.bot_secret = self.config.get("bot_secret") or self.secret
-        # App Secret for full user detail fetching (user/get).
-        # Since Aug 2022, WeCom blocks user/get from IPs registered under
-        # 管理工具→通讯录同步; only the 同步通讯录 App (AgentID 1000010) can call it.
-        self.app_secret = self.config.get("app_secret")
+        self.secret = self.config.get("secret") or self.config.get("app_secret") or self.config.get("corpsecret")
         self._access_token: str | None = None
         self._token_expires_at: datetime | None = None
-        self._app_access_token: str | None = None
-        self._app_token_expires_at: datetime | None = None
 
     async def _fetch_token(self, corp_id: str, secret: str) -> str:
         """Fetch a fresh WeCom access_token for the given corp_id/secret pair."""
@@ -974,62 +988,25 @@ class WeComOrgSyncAdapter(BaseOrgSyncAdapter):
         return self.WECOM_API_URL
 
     async def get_access_token(self) -> str:
-        """Get valid access token for WeCom API (通讯录同步 Secret).
-        
-        Used for structural operations: department list, user/list_id.
-        NOT suitable for user/get since Aug 2022 API restriction.
+        """Get valid access token using the 通讯录同步 (contact-sync) secret.
+
+        This token can call department/simplelist and user/list_id.
+        It cannot call user/list or user/get (those raise errcode 48009).
+        Full user profiles are obtained passively via SSO login instead.
         """
         if self._access_token and self._token_expires_at and datetime.now() < self._token_expires_at:
             return self._access_token
 
-        # Priority 1: Standard CorpID + 通讯录同步 Secret
-        if self.corp_id and self.secret:
-            try:
-                token = await self._fetch_token(self.corp_id, self.secret)
-                expires_in = 7200
-                self._access_token = token
-                self._token_expires_at = datetime.now() + timedelta(seconds=max(expires_in - 300, 300))
-                return token
-            except Exception as e:
-                logger.error(f"[WeCom Sync] Token error with corp_id+secret: {e}")
+        if not self.corp_id or not self.secret:
+            raise ValueError("WeCom corp_id or secret missing in provider config")
 
-        # Priority 2: Try bot_id as corp_id if no corp_id provided (fallback)
-        if not self.corp_id and self.bot_id and self.bot_secret:
-            try:
-                token = await self._fetch_token(self.bot_id, self.bot_secret)
-                self._access_token = token
-                self._token_expires_at = datetime.now() + timedelta(seconds=max(7200 - 300, 300))
-                return token
-            except Exception as e:
-                logger.error(f"[WeCom Sync] Token error with bot_id+bot_secret: {e}")
+        token = await self._fetch_token(self.corp_id, self.secret)
+        self._access_token = token
+        # Refresh slightly before true expiry to avoid clock-skew issues
+        self._token_expires_at = datetime.now() + timedelta(seconds=7200 - 300)
+        return token
 
-        raise ValueError("WeCom credentials (corp_id/secret or bot_id/secret) missing or invalid")
 
-    async def get_app_access_token(self) -> str | None:
-        """Get access token for the 同步通讯录 App (AgentID 1000010).
-
-        This token is required for user/get API calls. Since Aug 2022 WeCom
-        no longer allows user/get from 通讯录同步 IPs; only the App credential
-        (同步通讯录 self-built app) can call it. Returns None when app_secret
-        is not configured — callers should fall back gracefully.
-        """
-        if not self.corp_id or not self.app_secret:
-            return None
-
-        if self._app_access_token and self._app_token_expires_at and datetime.now() < self._app_token_expires_at:
-            return self._app_access_token
-
-        try:
-            token = await self._fetch_token(self.corp_id, self.app_secret)
-            self._app_access_token = token
-            self._app_token_expires_at = datetime.now() + timedelta(seconds=7200 - 300)
-            logger.info("[WeCom Sync] Obtained App access token for user/get calls.")
-            return token
-        except Exception as e:
-            logger.warning(
-                f"[WeCom Sync] Failed to get App access token (app_secret may be wrong or IP not whitelisted): {e}"
-            )
-            return None
 
     async def fetch_departments(self) -> list[ExternalDepartment]:
         """Fetch all departments from WeCom using the simplelist endpoint.
@@ -1070,63 +1047,29 @@ class WeComOrgSyncAdapter(BaseOrgSyncAdapter):
         return all_depts
 
     async def fetch_users(self, department_external_id: str) -> list[ExternalUser]:
-        """Fetch user details in a department from WeCom.
+        """Fetch user stubs for a department using user/list_id.
 
-        Tries the fast bulk API (user/list) first.  If the contact assistant
-        token returns 48009 ('api forbidden for contact assistant'), falls back
-        to the two-step approach: user/list_id (IDs only) then user/get per
-        user.  Both fallback APIs ARE accessible to the contact assistant.
+        WeCom API strategy for org sync:
+        - user/list  (bulk detail) → errcode 48009 for contact-sync token; removed.
+        - user/get   (per-user detail) → IP-whitelisted only; removed.
+        - user/list_id (ID only)   → works with contact-sync token; used here.
+
+        Only userid and open_userid are obtained in org sync. Full profile
+        data (name, avatar, email, mobile) is enriched passively when each
+        user completes their first WeCom SSO login (via auth/getuserdetail).
         """
         token = await self.get_access_token()
-        try:
-            return await self._fetch_users_bulk(token, department_external_id)
-        except RuntimeError as exc:
-            if "48009" in str(exc) or "forbidden for contact assistant" in str(exc):
-                logger.info(
-                    f"[WeCom Sync] user/list returned 48009 for dept {department_external_id}, "
-                    "falling back to list_id + user/get (contact assistant mode)"
-                )
-                return await self._fetch_users_by_id(token, department_external_id)
-            raise
+        return await self._fetch_user_stubs(token, department_external_id)
 
-    async def _fetch_users_bulk(self, token: str, department_external_id: str) -> list[ExternalUser]:
-        """Fast path: fetch all users in one request using user/list."""
-        users: list[ExternalUser] = []
+    async def _fetch_user_stubs(self, sync_token: str, department_external_id: str) -> list[ExternalUser]:
+        """Fetch minimal user stubs via user/list_id.
 
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
-                self.WECOM_USER_LIST_URL,
-                params={
-                    "access_token": token,
-                    "department_id": department_external_id,
-                    "fetch_child": 0,
-                },
-            )
-            data = resp.json()
-            if data.get("errcode") != 0:
-                raise RuntimeError(f"WeCom user list error: {data.get('errmsg') or data}")
-
-            for item in data.get("userlist", []):
-                users.append(self._wecom_item_to_external_user(item, department_external_id))
-
-        return users
-
-    async def _fetch_users_by_id(self, sync_token: str, department_external_id: str) -> list[ExternalUser]:
-        """Fallback path: list_id (sync token) + individual user/get (app token).
-
-        1. user/list_id (sync token)  → get {userid, open_userid} for all dept members
-        2. user/get (app token)       → get full details for each userid concurrently
-
-        WeCom API restriction since Aug 2022: user/get requires the 同步通讯录
-        App credential (AgentID 1000010), not the 通讯录同步 Secret. If app_secret
-        is configured, we use the App token; otherwise we fall back to the sync token
-        which will produce 48009 degraded placeholder records.
+        Returns placeholder ExternalUser objects with only userid and open_userid
+        populated. The name is intentionally set to the userid so the passive
+        SSO enrichment in sso_service.link_identity() can detect the placeholder
+        and overwrite it with the real name from auth/getuserdetail.
         """
-        import asyncio
-
-        # Step 1: collect all user IDs via list_id API (sync token works fine here)
-        user_ids: list[str] = []
-        open_id_map: dict[str, str] = {}  # userid -> open_userid
+        user_stubs: list[ExternalUser] = []
         cursor = ""
 
         async with httpx.AsyncClient(timeout=15) as client:
@@ -1146,79 +1089,23 @@ class WeComOrgSyncAdapter(BaseOrgSyncAdapter):
 
                 for entry in data.get("dept_user", []):
                     uid = entry.get("userid", "")
-                    if uid:
-                        user_ids.append(uid)
-                        open_id_map[uid] = entry.get("open_userid", "")
+                    if not uid:
+                        continue
+                    # Use userid as the name placeholder so link_identity() knows
+                    # to overwrite it once the user logs in via SSO.
+                    user_stubs.append(ExternalUser(
+                        external_id=uid,
+                        name=uid,  # placeholder — enriched on first SSO login
+                        open_id=entry.get("open_userid", ""),
+                        department_external_id=department_external_id,
+                        department_ids=[department_external_id],
+                    ))
 
                 cursor = data.get("next_cursor", "")
                 if not cursor:
                     break
 
-        if not user_ids:
-            return []
-
-        # Step 2: fetch details for each user via user/get — must use App token
-        # App token is obtained from app_secret (同步通讯录 App, AgentID 1000010).
-        app_token = await self.get_app_access_token()
-        get_token = app_token or sync_token  # fallback to sync token if app_secret not configured
-        if not app_token:
-            logger.warning(
-                "[WeCom Sync] app_secret not configured; user/get will use sync token and likely return 48009. "
-                "Configure app_secret (from App Management > Sync Contacts) to fetch full user details."
-            )
-
-        sem = asyncio.Semaphore(10)
-
-        async def get_one(uid: str) -> ExternalUser | None:
-            async with sem:
-                async with httpx.AsyncClient(timeout=10) as cl:
-                    resp = await cl.get(
-                        self.WECOM_USER_GET_URL,
-                        params={"access_token": get_token, "userid": uid},
-                    )
-                    item = resp.json()
-                    if item.get("errcode") != 0:
-                        logger.warning(
-                            f"[WeCom Sync] user/get failed for {uid}: errcode={item.get('errcode')} {item.get('errmsg')}"
-                        )
-                        # Degraded mode: save a minimal member entry so the user appears in the org chart.
-                        # Full details require a correctly configured app_secret.
-                        return ExternalUser(
-                            external_id=uid,
-                            name=uid,  # Use userid as display name until full details are available
-                            open_id=open_id_map.get(uid, ""),
-                            department_external_id=department_external_id,
-                            department_ids=[department_external_id],
-                        )
-                    # Inject open_userid obtained from list_id step
-                    item.setdefault("open_userid", open_id_map.get(uid, ""))
-                    return self._wecom_item_to_external_user(item, department_external_id)
-
-        results = await asyncio.gather(*[get_one(uid) for uid in user_ids])
-        users = [u for u in results if u is not None]
-        return users
-
-
-    def _wecom_item_to_external_user(self, item: dict, department_external_id: str) -> ExternalUser:
-        """Convert a WeCom user dict (from user/list or user/get) to ExternalUser."""
-        external_id = item.get("userid", "")
-        dept_ids = [str(did) for did in item.get("department", [])]
-        if not dept_ids:
-            dept_ids = [department_external_id]
-
-        return ExternalUser(
-            external_id=external_id,
-            name=item.get("name", ""),
-            open_id=item.get("open_userid", "") or item.get("openid", ""),
-            email=item.get("email", "") or item.get("biz_mail", ""),
-            avatar_url=item.get("avatar", ""),
-            title=item.get("position", ""),
-            department_external_id=department_external_id,
-            department_ids=dept_ids,
-            mobile=item.get("mobile", ""),
-            status="active" if item.get("status") == 1 else "inactive",
-            raw_data=item,
-        )
+        return user_stubs
 
 
 # Adapter class mapping
